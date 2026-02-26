@@ -18,8 +18,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -29,7 +27,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,7 +45,6 @@ import com.droidprobe.app.DroidProbeApplication
 import com.droidprobe.app.data.model.ContentProviderCallInfo
 import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.DexAnalysis
-import com.droidprobe.app.data.model.ExportedComponent
 import com.droidprobe.app.data.model.FileProviderInfo
 import com.droidprobe.app.data.model.IntentInfo
 import com.droidprobe.app.data.model.ProviderComponent
@@ -163,7 +159,8 @@ fun AnalysisScreen(
                         )
                         ActionButton(
                             icon = Icons.AutoMirrored.Filled.Send,
-                            label = "Intent Builder",
+                            label = if (uiState.isDexAnalyzing) "Analyzing..." else "Intent Builder",
+                            enabled = !uiState.isDexAnalyzing,
                             onClick = { onNavigateToIntentBuilder(packageName) }
                         )
                         ActionButton(
@@ -177,31 +174,6 @@ fun AnalysisScreen(
                         modifier = Modifier.padding(horizontal = 16.dp),
                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
                     )
-
-                    // Activities
-                    SectionHeader(
-                        title = "Activities",
-                        count = manifest.activities.size,
-                        initiallyExpanded = true
-                    ) {
-                        ComponentList(components = manifest.activities)
-                    }
-
-                    // Services
-                    SectionHeader(
-                        title = "Services",
-                        count = manifest.services.size
-                    ) {
-                        ComponentList(components = manifest.services)
-                    }
-
-                    // Receivers
-                    SectionHeader(
-                        title = "Broadcast Receivers",
-                        count = manifest.receivers.size
-                    ) {
-                        ComponentList(components = manifest.receivers)
-                    }
 
                     // Content Providers
                     SectionHeader(
@@ -278,106 +250,6 @@ private fun ActionButton(
             maxLines = 1,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
-    }
-}
-
-@Composable
-private fun ComponentList(components: List<ExportedComponent>) {
-    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-        components.forEach { component ->
-            ComponentCard(component = component)
-            Spacer(modifier = Modifier.height(4.dp))
-        }
-    }
-}
-
-@Composable
-private fun ComponentCard(component: ExportedComponent) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            val isBrowsable = component.intentFilters.any { filter ->
-                filter.categories.any { it == "android.intent.category.BROWSABLE" }
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = component.name.substringAfterLast('.'),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (isBrowsable) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                            text = "BROWSABLE",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-                PermissionBadge(
-                    isExported = component.isExported,
-                    permission = component.permission
-                )
-            }
-
-            Text(
-                text = component.name,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            if (component.permission != null) {
-                Text(
-                    text = "Permission: ${component.permission}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-
-            component.intentFilters.forEach { filter ->
-                if (filter.actions.isNotEmpty()) {
-                    Text(
-                        text = "Actions: ${filter.actions.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-                if (filter.categories.isNotEmpty()) {
-                    Text(
-                        text = "Categories: ${filter.categories.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-                if (filter.dataSchemes.isNotEmpty()) {
-                    Text(
-                        text = "Schemes: ${filter.dataSchemes.joinToString(", ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-            }
-        }
     }
 }
 

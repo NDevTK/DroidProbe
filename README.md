@@ -1,6 +1,6 @@
 # DroidProbe
 
-Android security tool that scans installed apps' bytecode to discover content providers, file providers, and intent interfaces, then generates a contextual GUI for interacting with them — no root required.
+Android security tool that scans installed apps bytecode to discover content providers, file providers, and intent interfaces, then generates a contextual GUI for interacting with them — no root required.
 
 Unlike tools like Drozer that require typing raw URIs and intent parameters, DroidProbe automatically discovers IPC surfaces from DEX bytecode and presents them as tappable, interactive UI elements.
 

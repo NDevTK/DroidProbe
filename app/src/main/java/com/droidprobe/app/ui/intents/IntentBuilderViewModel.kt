@@ -127,6 +127,21 @@ class IntentBuilderViewModel(
                         // Match deep link URIs by sourceClass — same approach as extras.
                         // The sourceClass tells us which class the UriMatcher lives in.
                         val compSmali = "L${comp.name.replace('.', '/')};"
+                        // Build per-component scheme fallback from manifest intent filters
+                        val compSchemeByAuthority = mutableMapOf<String, String>()
+                        var compFallbackScheme: String? = null
+                        for (filter in comp.intentFilters) {
+                            val schemes = filter.dataSchemes.filter { it != "content" }
+                            if (schemes.isNotEmpty()) {
+                                if (compFallbackScheme == null) compFallbackScheme = schemes.first()
+                                for (authority in filter.dataAuthorities) {
+                                    for (scheme in schemes) {
+                                        compSchemeByAuthority.putIfAbsent(authority, scheme)
+                                    }
+                                }
+                            }
+                        }
+
                         val compDataUris = mutableListOf<String>()
                         val perUriParams = mutableMapOf<String, List<String>>()
                         val perUriParamValues = mutableMapOf<String, Map<String, List<String>>>()
@@ -140,6 +155,8 @@ class IntentBuilderViewModel(
                             } else {
                                 val authority = uri.substringBefore('/')
                                 val scheme = schemeByAuthority[authority]
+                                    ?: compSchemeByAuthority[authority]
+                                    ?: compFallbackScheme
                                 fullUri = if (scheme != null) "$scheme://$uri" else uri
                             }
                             compDataUris.add(fullUri)

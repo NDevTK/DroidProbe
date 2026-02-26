@@ -19,9 +19,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
@@ -52,6 +54,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -118,9 +126,17 @@ fun IntentBuilderScreen(
                 }
             }
 
-            // Group by type
+            // Group by type, sort within each group by risk: BROWSABLE > EXPOSED > PROTECTED
             val grouped = uiState.targets.groupBy { it.type }
             grouped.forEach { (type, targets) ->
+                val sorted = targets.sortedWith(compareBy { target ->
+                    when {
+                        target.categories.any { it == "android.intent.category.BROWSABLE" } -> 0
+                        target.component.permission == null -> 1
+                        else -> 2
+                    }
+                })
+
                 item {
                     Text(
                         text = when (type) {
@@ -135,7 +151,7 @@ fun IntentBuilderScreen(
                     )
                 }
 
-                items(targets, key = { it.component.name }) { target ->
+                items(sorted, key = { it.component.name }) { target ->
                     val isExpanded = uiState.expandedTarget?.component?.name == target.component.name
                     TargetCard(
                         target = target,
@@ -457,18 +473,57 @@ private fun TargetCard(
                         }
                     }
 
-                    FilledTonalButton(
-                        onClick = onLaunchWithExtras,
-                        modifier = Modifier.fillMaxWidth()
+                    val isBrowsable = target.categories.any { it == "android.intent.category.BROWSABLE" }
+                    val showLinkActions = isBrowsable && dataUri.isNotBlank()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, null)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
+                        FilledTonalButton(
+                            onClick = onLaunchWithExtras,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, null)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
+                        }
+
+                        if (showLinkActions) {
+                            val context = LocalContext.current
+                            IconButton(onClick = {
+                                val fullUri = buildFullUri(dataUri, queryParams)
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Deep Link", fullUri))
+                                Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(Icons.Default.ContentCopy, "Copy Link")
+                            }
+                            IconButton(onClick = {
+                                val fullUri = buildFullUri(dataUri, queryParams)
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, fullUri)
+                                }
+                                context.startActivity(Intent.createChooser(shareIntent, "Share Link"))
+                            }) {
+                                Icon(Icons.Default.Share, "Share Link")
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+private fun buildFullUri(dataUri: String, queryParams: List<QueryParamEntry>): String {
+    val builder = Uri.parse(dataUri).buildUpon()
+    queryParams.filter { it.value.isNotBlank() }.forEach { param ->
+        builder.appendQueryParameter(param.key, param.value)
+    }
+    return builder.build().toString()
 }
 
 /**
