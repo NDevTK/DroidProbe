@@ -12,8 +12,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        DexDebugLog.enabled = true
-        DexDebugLog.filterClass = "HandleUris"
         setContent {
             DroidProbeTheme {
                 DroidProbeNavGraph()

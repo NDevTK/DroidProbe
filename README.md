@@ -37,15 +37,15 @@ Unlike tools like Drozer that require typing raw URIs and intent parameters, Dro
 
 | Component | Version |
 |---|---|
-| Kotlin | 2.1.0 |
-| Jetpack Compose (BOM) | 2024.12.01 |
+| Kotlin | 2.2.10 |
+| Jetpack Compose (BOM) | 2026.02.00 |
 | Material 3 | Latest via BOM |
-| Android Gradle Plugin | 8.7.3 |
-| Room | 2.6.1 |
-| Navigation Compose | 2.8.5 |
+| Android Gradle Plugin | 9.0.1 |
+| Room | 2.8.4 |
+| Navigation Compose | 2.9.7 |
 | smali-dexlib2 | 3.0.9 |
 | Min SDK | 26 |
-| Target SDK | 35 |
+| Target SDK | 36 |
 
 ## Architecture
 
