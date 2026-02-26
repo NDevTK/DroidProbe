@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield shape -->
+    <path
+        android:fillColor="#3FB950"
+        android:pathData="M54,24 L30,36 L30,54 C30,70.5 40.2,86.1 54,90 C67.8,86.1 78,70.5 78,54 L78,36 Z" />
+    <!-- Search/probe icon inside shield -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M50,48 A8,8 0 1,1 50,64 A8,8 0 1,1 50,48 Z" />
+    <path
+        android:strokeColor="#0D1117"
+        android:strokeWidth="4"
+        android:pathData="M56,60 L64,68" />
+</vector>

@@ -1,0 +1,2 @@
+-keep class com.android.tools.smali.** { *; }
+-dontwarn com.android.tools.smali.**
