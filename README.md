@@ -25,6 +25,14 @@ Unlike tools like Drozer that require typing raw URIs and intent parameters, Dro
 - **FileProvider Browser** — Discovered paths as tappable cards with inline probe results showing accessibility, size, MIME type, and content preview
 - **Class Hierarchy Resolution** — Extras are mapped to components via actual inheritance chain tracing, not name guessing
 
+## Screenshots
+
+<p align="center">
+  <img src="Screenshot1.png" alt="App Scanner" width="250"/>
+  <img src="Screenshot2.png" alt="Analysis" width="250"/>
+  <img src="Screenshot3.png" alt="Intent Launcher" width="250"/>
+</p>
+
 ## How It Works
 
 1. **Manifest pass** — Reads exported components, permissions, and provider authorities via `PackageManager`, then enriches intent filters by parsing binary AndroidManifest.xml (AXML) from the APK for complete action/category/data coverage
