@@ -5,5 +5,7 @@ data class DexAnalysis(
     val contentProviderUris: List<ContentProviderInfo>,
     val intentExtras: List<IntentInfo>,
     val fileProviderPaths: List<FileProviderInfo>,
-    val rawContentUriStrings: List<String>
+    val rawContentUriStrings: List<String>,
+    val deepLinkUriStrings: List<String> = emptyList(),
+    val contentProviderCalls: List<ContentProviderCallInfo> = emptyList()
 )

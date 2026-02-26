@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.droidprobe.app.DroidProbeApplication
+import com.droidprobe.app.data.model.ContentProviderCallInfo
 import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.DexAnalysis
 import com.droidprobe.app.data.model.ExportedComponent
@@ -299,8 +300,13 @@ private fun ComponentCard(component: ExportedComponent) {
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            val isBrowsable = component.intentFilters.any { filter ->
+                filter.categories.any { it == "android.intent.category.BROWSABLE" }
+            }
+
             Row(
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
                     text = component.name.substringAfterLast('.'),
@@ -309,6 +315,19 @@ private fun ComponentCard(component: ExportedComponent) {
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (isBrowsable) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = "BROWSABLE",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
                 PermissionBadge(
                     isExported = component.isExported,
                     permission = component.permission
@@ -483,15 +502,39 @@ private fun DexAnalysisSection(
         if (dexAnalysis != null) {
             Spacer(modifier = Modifier.height(8.dp))
 
+            // Split URIs into content:// (queryable) and deep links
+            val contentUris = dexAnalysis.contentProviderUris.filter {
+                it.uriPattern.startsWith("content://")
+            }
+            val deepLinkUris = dexAnalysis.contentProviderUris.filter {
+                !it.uriPattern.startsWith("content://")
+            }
+
             // Discovered content URIs
-            if (dexAnalysis.contentProviderUris.isNotEmpty()) {
+            if (contentUris.isNotEmpty()) {
                 SectionHeader(
-                    title = "Discovered URIs",
-                    count = dexAnalysis.contentProviderUris.size,
+                    title = "Content Provider URIs",
+                    count = contentUris.size,
                     initiallyExpanded = true
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                        dexAnalysis.contentProviderUris.forEach { uri ->
+                        contentUris.forEach { uri ->
+                            UriCard(uri)
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                    }
+                }
+            }
+
+            // Deep link URI patterns (from UriMatcher / Uri.parse with non-content schemes)
+            if (deepLinkUris.isNotEmpty()) {
+                SectionHeader(
+                    title = "Deep Link URIs",
+                    count = deepLinkUris.size,
+                    initiallyExpanded = true
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        deepLinkUris.forEach { uri ->
                             UriCard(uri)
                             Spacer(modifier = Modifier.height(4.dp))
                         }
@@ -531,6 +574,22 @@ private fun DexAnalysisSection(
                 }
             }
 
+            // Provider call() methods
+            if (dexAnalysis.contentProviderCalls.isNotEmpty()) {
+                SectionHeader(
+                    title = "Provider Call Methods",
+                    count = dexAnalysis.contentProviderCalls.size,
+                    initiallyExpanded = true
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        dexAnalysis.contentProviderCalls.forEach { callInfo ->
+                            ProviderCallCard(callInfo)
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                    }
+                }
+            }
+
             // Raw content URI strings
             if (dexAnalysis.rawContentUriStrings.isNotEmpty()) {
                 SectionHeader(
@@ -550,10 +609,31 @@ private fun DexAnalysisSection(
                 }
             }
 
+            // Deep link URI string constants
+            if (dexAnalysis.deepLinkUriStrings.isNotEmpty()) {
+                SectionHeader(
+                    title = "Deep Link Strings",
+                    count = dexAnalysis.deepLinkUriStrings.size
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        dexAnalysis.deepLinkUriStrings.forEach { uri ->
+                            Text(
+                                text = uri,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier.padding(vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             if (dexAnalysis.contentProviderUris.isEmpty() &&
                 dexAnalysis.intentExtras.isEmpty() &&
                 dexAnalysis.fileProviderPaths.isEmpty() &&
-                dexAnalysis.rawContentUriStrings.isEmpty()
+                dexAnalysis.contentProviderCalls.isEmpty() &&
+                dexAnalysis.rawContentUriStrings.isEmpty() &&
+                dexAnalysis.deepLinkUriStrings.isEmpty()
             ) {
                 Text(
                     text = "No IPC patterns found in bytecode.",
@@ -583,6 +663,13 @@ private fun UriCard(info: ContentProviderInfo) {
                     text = "Match code: ${info.matchCode}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (info.queryParameters.isNotEmpty()) {
+                Text(
+                    text = "Query params: ${info.queryParameters.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary
                 )
             }
             Text(
@@ -629,6 +716,34 @@ private fun IntentExtraCard(info: IntentInfo) {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ProviderCallCard(info: ContentProviderCallInfo) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(
+                text = info.methodName,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (info.authority != null) {
+                Text(
+                    text = "Authority: ${info.authority}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "Source: ${info.sourceClass.removePrefix("L").removeSuffix(";").replace('/', '.')}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

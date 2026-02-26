@@ -25,6 +25,14 @@ class StringConstantCollector {
     fun getContentUriStrings(): List<String> =
         allStrings.filter { it.startsWith("content://") }.sorted()
 
+    fun getDeepLinkUriStrings(): List<String> =
+        allStrings.filter { s ->
+            val schemeEnd = s.indexOf("://")
+            schemeEnd > 0 && !s.startsWith("content://") && !s.startsWith("http://") &&
+                    !s.startsWith("https://") && !s.startsWith("file://") &&
+                    s.length > schemeEnd + 3 && s[schemeEnd + 3].isLetterOrDigit()
+        }.sorted()
+
     fun getColumnNameCandidates(): List<String> =
         allStrings.filter { isLikelyColumnName(it) }.sorted()
 

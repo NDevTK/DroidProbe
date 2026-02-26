@@ -46,7 +46,7 @@ class AnalysisViewModel(
                 val appName = packageManager.getApplicationLabel(appInfo).toString()
                 val sourceDir = appInfo.sourceDir
 
-                val manifest = analysisRepository.analyzeManifest(packageName)
+                val manifest = analysisRepository.analyzeManifest(packageName, sourceDir)
 
                 _uiState.update {
                     it.copy(

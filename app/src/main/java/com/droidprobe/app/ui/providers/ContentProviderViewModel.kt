@@ -57,19 +57,21 @@ class ContentProviderViewModel(
 
                 val uris = mutableListOf<QueryableUri>()
 
-                // Add URIs from DEX analysis
-                dex?.contentProviderUris?.forEach { info ->
-                    uris.add(
-                        QueryableUri(
-                            uri = info.uriPattern,
-                            source = "DEX",
-                            sourceClass = info.sourceClass
-                                .removePrefix("L").removeSuffix(";").replace('/', '.'),
-                            matchCode = info.matchCode,
-                            columns = info.associatedColumns
+                // Add URIs from DEX analysis (only content:// URIs are queryable)
+                dex?.contentProviderUris
+                    ?.filter { it.uriPattern.startsWith("content://") }
+                    ?.forEach { info ->
+                        uris.add(
+                            QueryableUri(
+                                uri = info.uriPattern,
+                                source = "DEX",
+                                sourceClass = info.sourceClass
+                                    .removePrefix("L").removeSuffix(";").replace('/', '.'),
+                                matchCode = info.matchCode,
+                                columns = info.associatedColumns
+                            )
                         )
-                    )
-                }
+                    }
 
                 // Add raw content:// strings from DEX that weren't already found
                 val knownUris = uris.map { it.uri }.toSet()

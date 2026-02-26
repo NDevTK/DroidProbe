@@ -19,10 +19,10 @@ class AnalysisRepository(
     private val dexCache = ConcurrentHashMap<String, DexAnalysis>()
     private val manifestCache = ConcurrentHashMap<String, ManifestAnalysis>()
 
-    suspend fun analyzeManifest(packageName: String): ManifestAnalysis {
+    suspend fun analyzeManifest(packageName: String, apkPath: String? = null): ManifestAnalysis {
         manifestCache[packageName]?.let { return it }
         return withContext(Dispatchers.IO) {
-            manifestAnalyzer.analyze(packageName).also {
+            manifestAnalyzer.analyze(packageName, apkPath).also {
                 manifestCache[packageName] = it
             }
         }

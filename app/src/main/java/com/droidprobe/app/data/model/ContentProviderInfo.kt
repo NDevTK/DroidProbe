@@ -5,6 +5,7 @@ data class ContentProviderInfo(
     val uriPattern: String,
     val matchCode: Int?,
     val associatedColumns: List<String>,
+    val queryParameters: List<String> = emptyList(),
     val sourceClass: String,
     val sourceMethod: String?
 )

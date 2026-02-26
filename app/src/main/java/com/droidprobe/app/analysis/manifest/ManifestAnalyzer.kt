@@ -14,7 +14,7 @@ import com.droidprobe.app.data.model.ProviderComponent
 
 class ManifestAnalyzer(private val packageManager: PackageManager) {
 
-    fun analyze(packageName: String): ManifestAnalysis {
+    fun analyze(packageName: String, apkPath: String? = null): ManifestAnalysis {
         val flags = PackageManager.GET_ACTIVITIES or
                 PackageManager.GET_SERVICES or
                 PackageManager.GET_RECEIVERS or
@@ -32,13 +32,61 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
             packageManager.getPackageInfo(packageName, flags)
         }
 
-        return ManifestAnalysis(
+        val base = ManifestAnalysis(
             packageName = packageName,
             activities = extractComponents(packageInfo.activities),
             services = extractComponents(packageInfo.services),
             receivers = extractComponents(packageInfo.receivers),
             providers = extractProviders(packageInfo.providers),
             customPermissions = packageInfo.permissions?.map { it.name } ?: emptyList()
+        )
+
+        // Enrich with binary manifest XML for complete intent filters
+        if (apkPath != null) {
+            try {
+                val binaryFilters = BinaryManifestParser().parseFromApk(apkPath)
+                if (binaryFilters.isNotEmpty()) {
+                    return enrichWithBinaryFilters(base, binaryFilters)
+                }
+            } catch (_: Exception) {
+                // Fall back to PM-only result
+            }
+        }
+
+        return base
+    }
+
+    private fun enrichWithBinaryFilters(
+        base: ManifestAnalysis,
+        binaryFilters: Map<String, List<BinaryManifestParser.RawIntentFilter>>
+    ): ManifestAnalysis {
+        fun enrichComponents(components: List<ExportedComponent>): List<ExportedComponent> {
+            return components.map { component ->
+                val rawFilters = binaryFilters[component.name]
+                if (rawFilters != null && rawFilters.isNotEmpty()) {
+                    component.copy(intentFilters = rawFilters.map { raw ->
+                        IntentFilterInfo(
+                            actions = raw.actions,
+                            categories = raw.categories,
+                            dataSchemes = raw.dataSchemes,
+                            dataAuthorities = raw.dataHosts.mapIndexed { i, host ->
+                                val port = raw.dataPorts.getOrNull(i)
+                                if (port != null) "$host:$port" else host
+                            },
+                            dataPaths = raw.dataPaths,
+                            mimeTypes = raw.dataMimeTypes
+                        )
+                    })
+                } else {
+                    component
+                }
+            }
+        }
+
+        return base.copy(
+            activities = enrichComponents(base.activities),
+            services = enrichComponents(base.services),
+            receivers = enrichComponents(base.receivers)
         )
     }
 
@@ -59,34 +107,35 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
     }
 
     private fun extractIntentFilters(component: ComponentInfo): List<IntentFilterInfo> {
-        // PackageManager doesn't directly expose intent filters in a structured way
-        // for arbitrary packages. We use queryIntentActivities for activities.
-        // For Phase 1, we extract what we can from the component metadata.
-        // Full intent filter extraction requires manifest XML parsing (Phase 2 enhancement).
-        if (component is ActivityInfo) {
-            return extractActivityIntentFilters(component)
+        return when (component) {
+            is ActivityInfo -> queryFilters(component.packageName, component.name, ComponentType.ACTIVITY)
+            is ServiceInfo -> queryFilters(component.packageName, component.name, ComponentType.SERVICE)
+            else -> queryFilters(component.packageName, component.name, ComponentType.RECEIVER)
         }
-        return emptyList()
     }
 
-    private fun extractActivityIntentFilters(activityInfo: ActivityInfo): List<IntentFilterInfo> {
-        // Try to discover intent filters by querying the package manager
-        // This is limited but works for main intent filters
+    private enum class ComponentType { ACTIVITY, SERVICE, RECEIVER }
+
+    private fun queryFilters(packageName: String, className: String, type: ComponentType): List<IntentFilterInfo> {
         return try {
             val intent = android.content.Intent().apply {
-                component = android.content.ComponentName(
-                    activityInfo.packageName,
-                    activityInfo.name
-                )
+                component = android.content.ComponentName(packageName, className)
             }
             val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                packageManager.queryIntentActivities(
-                    intent,
-                    PackageManager.ResolveInfoFlags.of(PackageManager.GET_RESOLVED_FILTER.toLong())
-                )
+                val flags = PackageManager.ResolveInfoFlags.of(PackageManager.GET_RESOLVED_FILTER.toLong())
+                when (type) {
+                    ComponentType.ACTIVITY -> packageManager.queryIntentActivities(intent, flags)
+                    ComponentType.SERVICE -> packageManager.queryIntentServices(intent, flags)
+                    ComponentType.RECEIVER -> packageManager.queryBroadcastReceivers(intent, flags)
+                }
             } else {
                 @Suppress("DEPRECATION")
-                packageManager.queryIntentActivities(intent, PackageManager.GET_RESOLVED_FILTER)
+                val flags = PackageManager.GET_RESOLVED_FILTER
+                when (type) {
+                    ComponentType.ACTIVITY -> packageManager.queryIntentActivities(intent, flags)
+                    ComponentType.SERVICE -> packageManager.queryIntentServices(intent, flags)
+                    ComponentType.RECEIVER -> packageManager.queryBroadcastReceivers(intent, flags)
+                }
             }
 
             resolveInfos.mapNotNull { resolveInfo ->
@@ -97,7 +146,7 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
                         dataSchemes = (0 until filter.countDataSchemes()).map { filter.getDataScheme(it) },
                         dataAuthorities = (0 until filter.countDataAuthorities()).map {
                             val auth = filter.getDataAuthority(it)
-                            "${auth.host}:${auth.port}"
+                            if (auth.port == -1) auth.host else "${auth.host}:${auth.port}"
                         },
                         dataPaths = (0 until filter.countDataPaths()).map {
                             filter.getDataPath(it).path

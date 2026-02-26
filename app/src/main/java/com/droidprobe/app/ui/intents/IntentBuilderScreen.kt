@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,19 +15,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -131,13 +134,17 @@ fun IntentBuilderScreen(
                         target = target,
                         isExpanded = isExpanded,
                         extras = if (isExpanded) uiState.extras else emptyList(),
+                        queryParams = if (isExpanded) uiState.queryParams else emptyList(),
+                        dataUri = if (isExpanded) uiState.dataUri else "",
                         onToggleExpand = {
                             if (isExpanded) viewModel.collapseTarget()
                             else viewModel.expandTarget(target)
                         },
                         onQuickLaunch = { viewModel.quickLaunch(target) },
                         onLaunchWithExtras = { viewModel.launchTarget(target) },
-                        onExtraChanged = { index, entry -> viewModel.updateExtra(index, entry) }
+                        onExtraChanged = { index, entry -> viewModel.updateExtra(index, entry) },
+                        onQueryParamChanged = { index, entry -> viewModel.updateQueryParam(index, entry) },
+                        onDataUriChanged = { viewModel.updateDataUri(it) }
                     )
                 }
             }
@@ -181,15 +188,20 @@ fun IntentBuilderScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TargetCard(
     target: LaunchableTarget,
     isExpanded: Boolean,
     extras: List<ExtraEntry>,
+    queryParams: List<QueryParamEntry>,
+    dataUri: String,
     onToggleExpand: () -> Unit,
     onQuickLaunch: () -> Unit,
     onLaunchWithExtras: () -> Unit,
-    onExtraChanged: (Int, ExtraEntry) -> Unit
+    onExtraChanged: (Int, ExtraEntry) -> Unit,
+    onQueryParamChanged: (Int, QueryParamEntry) -> Unit,
+    onDataUriChanged: (String) -> Unit
 ) {
     val typeIcon: ImageVector = when (target.type) {
         "Activity" -> Icons.AutoMirrored.Filled.OpenInNew
@@ -197,6 +209,8 @@ private fun TargetCard(
         "Receiver" -> Icons.Default.Notifications
         else -> Icons.AutoMirrored.Filled.OpenInNew
     }
+
+    val hasExpandableContent = target.discoveredExtras.isNotEmpty() || target.discoveredDataUris.isNotEmpty() || target.discoveredQueryParams.isNotEmpty()
 
     Card(
         modifier = Modifier
@@ -231,6 +245,19 @@ private fun TargetCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                if (target.categories.any { it == "android.intent.category.BROWSABLE" }) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = "BROWSABLE",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
                 PermissionBadge(
                     isExported = target.component.isExported,
                     permission = target.component.permission
@@ -259,9 +286,20 @@ private fun TargetCard(
                 }
             }
 
+            // Summary counts
+            val summaryParts = mutableListOf<String>()
             if (target.discoveredExtras.isNotEmpty()) {
+                summaryParts.add("${target.discoveredExtras.size} extras")
+            }
+            if (target.discoveredDataUris.isNotEmpty()) {
+                summaryParts.add("${target.discoveredDataUris.size} data URIs")
+            }
+            if (target.discoveredQueryParams.isNotEmpty()) {
+                summaryParts.add("${target.discoveredQueryParams.size} query params")
+            }
+            if (summaryParts.isNotEmpty()) {
                 Text(
-                    text = "${target.discoveredExtras.size} discovered extras",
+                    text = summaryParts.joinToString(" + "),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.padding(top = 2.dp)
@@ -284,74 +322,131 @@ private fun TargetCard(
                     Text("Launch")
                 }
 
-                if (target.discoveredExtras.isNotEmpty()) {
+                if (hasExpandableContent) {
                     FilledTonalButton(
                         onClick = onToggleExpand
                     ) {
                         Icon(
                             if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            "Extras"
+                            "Details"
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Extras")
+                        Text("Details")
                     }
                 }
             }
 
-            // Expandable extras editor
-            AnimatedVisibility(visible = isExpanded && extras.isNotEmpty()) {
+            // Expandable details editor
+            AnimatedVisibility(visible = isExpanded && hasExpandableContent) {
                 Column(
                     modifier = Modifier.padding(top = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        "Fill in extras before launching:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Deep link URI chips — tap to fill the data URI field
+                    if (target.discoveredDataUris.isNotEmpty()) {
+                        Text(
+                            "Data URI (tap to select):",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
 
-                    extras.forEachIndexed { index, entry ->
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            // Key (read-only, pre-filled from DEX)
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Column(modifier = Modifier.padding(8.dp)) {
-                                    Text(
-                                        text = entry.key,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = entry.type,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.tertiary
-                                    )
-                                }
-                            }
-
-                            // Value (editable with type-appropriate keyboard)
-                            OutlinedTextField(
-                                value = entry.value,
-                                onValueChange = { onExtraChanged(index, entry.copy(value = it)) },
-                                label = { Text(entry.type) },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = when (entry.type) {
-                                        "Int", "Long", "Short", "Byte" -> KeyboardType.Number
-                                        "Float", "Double" -> KeyboardType.Decimal
-                                        "Boolean" -> KeyboardType.Text
-                                        else -> KeyboardType.Text
+                            target.discoveredDataUris.forEach { uri ->
+                                FilterChip(
+                                    selected = dataUri == uri,
+                                    onClick = {
+                                        onDataUriChanged(if (dataUri == uri) "" else uri)
+                                    },
+                                    label = {
+                                        // Show just the path portion for readability
+                                        val display = uri.substringAfter("://")
+                                            .substringAfter('/')
+                                            .ifEmpty { uri }
+                                        Text(
+                                            text = display,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.Link,
+                                            contentDescription = null,
+                                            modifier = Modifier.height(16.dp)
+                                        )
                                     }
                                 )
+                            }
+                        }
+
+                        // Show the full selected URI
+                        if (dataUri.isNotBlank()) {
+                            Text(
+                                text = dataUri,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 2.dp)
                             )
+                        }
+                    }
+
+                    // Query parameters editor (shown when a data URI is selected)
+                    if (queryParams.isNotEmpty() && dataUri.isNotBlank()) {
+                        Text(
+                            "Query Parameters:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        queryParams.forEachIndexed { index, param ->
+                            OutlinedTextField(
+                                value = param.value,
+                                onValueChange = { onQueryParamChanged(index, param.copy(value = it)) },
+                                label = { Text(param.key) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                        }
+                    }
+
+                    // Extras editor
+                    if (extras.isNotEmpty()) {
+                        Text(
+                            "Extras:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        extras.forEachIndexed { index, entry ->
+                            Column {
+                                // Key label — full width so it never truncates
+                                Text(
+                                    text = entry.key,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                // Value (editable with type-appropriate keyboard)
+                                OutlinedTextField(
+                                    value = entry.value,
+                                    onValueChange = { onExtraChanged(index, entry.copy(value = it)) },
+                                    label = { Text(entry.type) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(
+                                        keyboardType = when (entry.type) {
+                                            "Int", "Long", "Short", "Byte" -> KeyboardType.Number
+                                            "Float", "Double" -> KeyboardType.Decimal
+                                            else -> KeyboardType.Text
+                                        }
+                                    )
+                                )
+                            }
                         }
                     }
 
@@ -361,7 +456,7 @@ private fun TargetCard(
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, null)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Launch with Extras")
+                        Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
                     }
                 }
             }

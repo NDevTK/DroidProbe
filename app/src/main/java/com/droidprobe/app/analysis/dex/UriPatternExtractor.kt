@@ -20,18 +20,20 @@ import com.droidprobe.app.data.model.ManifestAnalysis
  * 3. ContentUris.withAppendedId() calls
  * 4. Static fields named CONTENT_URI or *_URI
  * 5. Raw "content://" string constants as fallback
+ *
+ * Uses forward register tracking so that string/int constants loaded once and reused
+ * across many calls (e.g. an authority loaded once for 50+ addURI calls) are resolved
+ * correctly regardless of distance from the call site.
  */
 class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
 
     private val results = mutableListOf<ContentProviderInfo>()
     private val seenUris = mutableSetOf<String>()
     private val knownAuthorities = manifestAnalysis.providers.mapNotNull { it.authority }.toSet()
+    private val queryParamsByClass = mutableMapOf<String, MutableSet<String>>()
 
     fun process(classDef: DexBackedClassDef) {
-        // Check static fields for CONTENT_URI patterns
         checkStaticFields(classDef)
-
-        // Scan methods
         for (method in classDef.methods) {
             val impl = method.implementation ?: continue
             val instructions = impl.instructions.toList()
@@ -39,14 +41,22 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         }
     }
 
-    fun getResults(): List<ContentProviderInfo> = results.toList()
+    fun getResults(): List<ContentProviderInfo> {
+        return results.map { info ->
+            val params = queryParamsByClass[info.sourceClass]
+            if (params != null && params.isNotEmpty()) {
+                info.copy(queryParameters = params.toList().sorted())
+            } else {
+                info
+            }
+        }
+    }
 
     private fun checkStaticFields(classDef: DexBackedClassDef) {
         for (field in classDef.staticFields) {
             if ((field.name.endsWith("URI") || field.name.endsWith("_URI") || field.name == "CONTENT_URI") &&
                 field.type == "Landroid/net/Uri;"
             ) {
-                // The actual URI value is initialized in <clinit>, we'll try to find it there
                 findUriInClinit(classDef, field.name)
             }
         }
@@ -57,7 +67,10 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         val impl = clinit.implementation ?: return
         val instructions = impl.instructions.toList()
 
-        for ((i, instr) in instructions.withIndex()) {
+        // Forward tracking for <clinit> too
+        val regStrings = mutableMapOf<Int, String>()
+        for (instr in instructions) {
+            trackStringRegisters(instr, regStrings)
             if (instr is ReferenceInstruction) {
                 val ref = instr.reference
                 if (ref is MethodReference &&
@@ -65,10 +78,11 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                     ref.name == "parse" &&
                     instr.opcode in listOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)
                 ) {
-                    // Look back for the string argument
-                    val uri = resolveStringArg(instructions, i)
-                    if (uri != null && uri.startsWith("content://")) {
-                        addResult(uri, null, classDef, "<clinit>")
+                    if (instr is Instruction35c) {
+                        val uri = regStrings[instr.registerC]
+                        if (uri != null && uri.contains("://")) {
+                            addResult(uri, null, classDef, "<clinit>")
+                        }
                     }
                 }
             }
@@ -80,20 +94,47 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         method: DexBackedMethod,
         instructions: List<Instruction>
     ) {
-        for ((i, instr) in instructions.withIndex()) {
+        val regStrings = mutableMapOf<Int, String>()
+        val regInts = mutableMapOf<Int, Int>()
+
+        for (instr in instructions) {
+            trackStringRegisters(instr, regStrings)
+            trackIntRegisters(instr, regInts)
+
             if (instr !is ReferenceInstruction) continue
             val ref = instr.reference
             if (ref !is MethodReference) continue
 
             when {
-                // Strategy 1: UriMatcher.addURI(authority, path, code)
-                isUriMatcherAddUri(ref) -> handleAddUri(instructions, i, classDef, method)
+                isUriMatcherAddUri(ref) -> handleAddUri(regStrings, regInts, instr, classDef, method)
+                isUriParse(ref) -> handleUriParse(regStrings, instr, classDef, method)
+                isContentUrisWithAppendedId(ref) -> handleContentUris(regStrings, instr, classDef, method)
+                isGetQueryParameter(ref) -> handleGetQueryParameter(regStrings, instr, classDef)
+            }
+        }
+    }
 
-                // Strategy 2: Uri.parse(string)
-                isUriParse(ref) -> handleUriParse(instructions, i, classDef, method)
+    /**
+     * Track const-string / const-string/jumbo instructions into the register→string map.
+     */
+    private fun trackStringRegisters(instr: Instruction, regStrings: MutableMap<Int, String>) {
+        if (instr.opcode == Opcode.CONST_STRING || instr.opcode == Opcode.CONST_STRING_JUMBO) {
+            if (instr is OneRegisterInstruction && instr is ReferenceInstruction) {
+                val ref = instr.reference
+                if (ref is StringReference) {
+                    regStrings[instr.registerA] = ref.string
+                }
+            }
+        }
+    }
 
-                // Strategy 3: ContentUris.withAppendedId(uri, id)
-                isContentUrisWithAppendedId(ref) -> handleContentUris(instructions, i, classDef, method)
+    /**
+     * Track const/4, const/16, const, const/high16 into the register→int map.
+     */
+    private fun trackIntRegisters(instr: Instruction, regInts: MutableMap<Int, Int>) {
+        if (instr is NarrowLiteralInstruction && instr is OneRegisterInstruction) {
+            if (instr.opcode in listOf(Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16)) {
+                regInts[instr.registerA] = instr.narrowLiteral
             }
         }
     }
@@ -106,29 +147,28 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     }
 
     private fun handleAddUri(
-        instructions: List<Instruction>,
-        callIndex: Int,
+        regStrings: Map<Int, String>,
+        regInts: Map<Int, Int>,
+        instr: Instruction,
         classDef: DexBackedClassDef,
         method: DexBackedMethod
     ) {
-        val instr = instructions[callIndex]
         if (instr !is Instruction35c) return
 
         // addURI(authority: String, path: String, code: int)
         // Registers: v_obj(this), v_authority, v_path, v_code
-        val authorityReg = instr.registerD
-        val pathReg = instr.registerE
-        val codeReg = instr.registerF
-
-        val authority = resolveStringFromRegister(instructions, callIndex, authorityReg)
-        val path = resolveStringFromRegister(instructions, callIndex, pathReg)
-        val code = resolveIntFromRegister(instructions, callIndex, codeReg)
+        val authority = regStrings[instr.registerD]
+        val path = regStrings[instr.registerE]
+        val code = regInts[instr.registerF]
 
         if (authority != null && path != null) {
-            val uri = "content://$authority/$path"
+            val uri = if (authority in knownAuthorities) {
+                "content://$authority/$path"
+            } else {
+                "$authority/$path"
+            }
             addResult(uri, code, classDef, method.name)
         } else if (path != null) {
-            // Try matching with known authorities
             for (knownAuth in knownAuthorities) {
                 val uri = "content://$knownAuth/$path"
                 addResult(uri, code, classDef, method.name)
@@ -144,13 +184,14 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     }
 
     private fun handleUriParse(
-        instructions: List<Instruction>,
-        callIndex: Int,
+        regStrings: Map<Int, String>,
+        instr: Instruction,
         classDef: DexBackedClassDef,
         method: DexBackedMethod
     ) {
-        val uri = resolveStringArg(instructions, callIndex)
-        if (uri != null && uri.startsWith("content://")) {
+        if (instr !is Instruction35c) return
+        val uri = regStrings[instr.registerC]
+        if (uri != null && uri.contains("://")) {
             addResult(uri, null, classDef, method.name)
         }
     }
@@ -163,78 +204,35 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     }
 
     private fun handleContentUris(
-        instructions: List<Instruction>,
-        callIndex: Int,
+        regStrings: Map<Int, String>,
+        instr: Instruction,
         classDef: DexBackedClassDef,
         method: DexBackedMethod
     ) {
-        // The first arg is a Uri - trace back to find a Uri.parse or sget for a CONTENT_URI
-        // This is harder to resolve statically, so we just note that a withAppendedId pattern exists
-        val uri = resolveStringArg(instructions, callIndex)
-        if (uri != null && uri.startsWith("content://")) {
+        if (instr !is Instruction35c) return
+        val uri = regStrings[instr.registerC]
+        if (uri != null && uri.contains("://")) {
             addResult("$uri/#", null, classDef, method.name)
         }
     }
 
-    // --- Register resolution helpers ---
+    // --- Strategy 4: Uri.getQueryParameter / getQueryParameters ---
 
-    /**
-     * Resolve a string constant that was loaded into any register right before a method call.
-     * Walks backward from the call to find the most recent const-string.
-     */
-    private fun resolveStringArg(instructions: List<Instruction>, callIndex: Int): String? {
-        val callInstr = instructions[callIndex]
-        if (callInstr is Instruction35c) {
-            // For invoke-static Uri.parse(String), the string is in registerC
-            val reg = callInstr.registerC
-            return resolveStringFromRegister(instructions, callIndex, reg)
-        }
-        return null
+    private fun isGetQueryParameter(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/net/Uri;" &&
+                (ref.name == "getQueryParameter" || ref.name == "getQueryParameters")
     }
 
-    /**
-     * Walk backward from callIndex to find a const-string that loads into the given register.
-     */
-    private fun resolveStringFromRegister(
-        instructions: List<Instruction>,
-        callIndex: Int,
-        register: Int
-    ): String? {
-        for (j in callIndex - 1 downTo maxOf(0, callIndex - 30)) {
-            val prev = instructions[j]
-            if (prev is OneRegisterInstruction && prev is ReferenceInstruction) {
-                if (prev.registerA == register && prev.reference is StringReference) {
-                    return (prev.reference as StringReference).string
-                }
-            }
-            // Also handle two-register const-string
-            if (prev.opcode == Opcode.CONST_STRING || prev.opcode == Opcode.CONST_STRING_JUMBO) {
-                if (prev is OneRegisterInstruction && prev.registerA == register) {
-                    val ref = (prev as? ReferenceInstruction)?.reference
-                    if (ref is StringReference) return ref.string
-                }
-            }
-        }
-        return null
-    }
-
-    /**
-     * Walk backward to find an integer constant loaded into the given register.
-     */
-    private fun resolveIntFromRegister(
-        instructions: List<Instruction>,
-        callIndex: Int,
-        register: Int
-    ): Int? {
-        for (j in callIndex - 1 downTo maxOf(0, callIndex - 20)) {
-            val prev = instructions[j]
-            if (prev is NarrowLiteralInstruction && prev is OneRegisterInstruction) {
-                if (prev.registerA == register) {
-                    return prev.narrowLiteral
-                }
-            }
-        }
-        return null
+    private fun handleGetQueryParameter(
+        regStrings: Map<Int, String>,
+        instr: Instruction,
+        classDef: DexBackedClassDef
+    ) {
+        if (instr !is Instruction35c) return
+        // getQueryParameter(name: String) — name is in registerD (first arg after this)
+        val paramName = regStrings[instr.registerD] ?: return
+        if (paramName.isBlank()) return
+        queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
     }
 
     // --- Result management ---
@@ -253,7 +251,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 authority = extractAuthority(uri),
                 uriPattern = uri,
                 matchCode = matchCode,
-                associatedColumns = emptyList(), // Populated later by cross-referencing StringConstantCollector
+                associatedColumns = emptyList(),
                 sourceClass = classDef.type,
                 sourceMethod = methodName
             )
@@ -261,8 +259,12 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     }
 
     private fun extractAuthority(uri: String): String? {
-        if (!uri.startsWith("content://")) return null
-        val afterScheme = uri.removePrefix("content://")
-        return afterScheme.substringBefore('/')
+        val schemeIndex = uri.indexOf("://")
+        if (schemeIndex >= 0) {
+            val afterScheme = uri.substring(schemeIndex + 3)
+            return afterScheme.substringBefore('/')
+        }
+        // No scheme — authority/path format from UriMatcher
+        return uri.substringBefore('/')
     }
 }

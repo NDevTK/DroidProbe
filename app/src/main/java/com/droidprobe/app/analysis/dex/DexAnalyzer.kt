@@ -57,6 +57,7 @@ class DexAnalyzer {
         addComponents(manifestAnalysis.receivers)
 
         val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses)
+        val callExtractor = ContentProviderCallExtractor()
 
         // --- Pass 2: Extract data from all classes ---
         for ((dexIndex, dexFile) in dexFiles.withIndex()) {
@@ -80,6 +81,7 @@ class DexAnalyzer {
                 uriExtractor.process(classDef)
                 intentExtractor.process(classDef)
                 fileProviderExtractor.process(classDef)
+                callExtractor.process(classDef)
             }
         }
 
@@ -91,7 +93,9 @@ class DexAnalyzer {
             contentProviderUris = uriExtractor.getResults(),
             intentExtras = resolvedExtras,
             fileProviderPaths = fileProviderExtractor.getResults(),
-            rawContentUriStrings = stringCollector.getContentUriStrings()
+            rawContentUriStrings = stringCollector.getContentUriStrings(),
+            deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
+            contentProviderCalls = callExtractor.getResults()
         )
     }
 
@@ -123,13 +127,19 @@ class DexAnalyzer {
                 type.startsWith("Lkotlinx/") ||
                 type.startsWith("Ljava/") ||
                 type.startsWith("Ljavax/") ||
-                type.startsWith("Lcom/google/android/") ||
                 type.startsWith("Ldalvik/") ||
                 type.startsWith("Lsun/") ||
                 type.startsWith("Lorg/json/") ||
                 type.startsWith("Lorg/xmlpull/") ||
                 type.startsWith("Lorg/xml/") ||
                 type.startsWith("Lorg/w3c/") ||
-                type.startsWith("Lorg/apache/")
+                type.startsWith("Lorg/apache/") ||
+                // Google support/framework libraries (NOT first-party app code)
+                type.startsWith("Lcom/google/android/material/") ||
+                type.startsWith("Lcom/google/android/gms/") ||
+                type.startsWith("Lcom/google/android/play/") ||
+                type.startsWith("Lcom/google/android/exoplayer") ||
+                type.startsWith("Lcom/google/android/datatransport/") ||
+                type.startsWith("Lcom/google/android/libraries/")
     }
 }

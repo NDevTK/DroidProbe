@@ -1,6 +1,7 @@
 package com.droidprobe.app.ui.intents
 
 import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -23,7 +24,9 @@ data class LaunchableTarget(
     val actions: List<String>,
     val categories: List<String>,
     val dataSchemes: List<String>,
-    val discoveredExtras: List<IntentInfo>
+    val discoveredExtras: List<IntentInfo>,
+    val discoveredDataUris: List<String> = emptyList(),
+    val discoveredQueryParams: List<String> = emptyList()
 )
 
 data class ExtraEntry(
@@ -32,12 +35,19 @@ data class ExtraEntry(
     val type: String = "String"
 )
 
+data class QueryParamEntry(
+    val key: String = "",
+    val value: String = ""
+)
+
 data class IntentBuilderUiState(
     val packageName: String = "",
     val targets: List<LaunchableTarget> = emptyList(),
     // Expanded target for editing extras before launch
     val expandedTarget: LaunchableTarget? = null,
     val extras: List<ExtraEntry> = emptyList(),
+    val queryParams: List<QueryParamEntry> = emptyList(),
+    val dataUri: String = "",
     val result: String? = null,
     val error: String? = null
 )
@@ -62,6 +72,37 @@ class IntentBuilderViewModel(
                 val dex = analysisRepository.getCachedDex(packageName)
                 val discoveredExtras = dex?.intentExtras ?: emptyList()
 
+                // Collect deep link URI patterns (non-content:// from UriMatcher/Uri.parse)
+                val deepLinkPatterns = dex?.contentProviderUris
+                    ?.filter { !it.uriPattern.startsWith("content://") }
+                    ?: emptyList()
+
+                // Build a scheme lookup from deep link string constants.
+                // e.g. "clock-app://com.google.android.deskclock" -> scheme "clock-app"
+                val schemeByAuthority = mutableMapOf<String, String>()
+                dex?.deepLinkUriStrings?.forEach { uriStr ->
+                    val schemeEnd = uriStr.indexOf("://")
+                    if (schemeEnd > 0) {
+                        val scheme = uriStr.substring(0, schemeEnd)
+                        val authority = uriStr.substring(schemeEnd + 3).substringBefore('/')
+                        if (authority.isNotEmpty()) {
+                            schemeByAuthority[authority] = scheme
+                        }
+                    }
+                }
+                // Also check full URIs in contentProviderUris
+                dex?.contentProviderUris?.forEach { info ->
+                    val uri = info.uriPattern
+                    val schemeEnd = uri.indexOf("://")
+                    if (schemeEnd > 0) {
+                        val scheme = uri.substring(0, schemeEnd)
+                        val authority = uri.substring(schemeEnd + 3).substringBefore('/')
+                        if (scheme != "content" && authority.isNotEmpty()) {
+                            schemeByAuthority[authority] = scheme
+                        }
+                    }
+                }
+
                 val targets = mutableListOf<LaunchableTarget>()
 
                 fun addTargets(components: List<ExportedComponent>, type: String) {
@@ -70,10 +111,32 @@ class IntentBuilderViewModel(
                         val allCategories = comp.intentFilters.flatMap { it.categories }
                         val allSchemes = comp.intentFilters.flatMap { it.dataSchemes }
 
-                        // Match by associatedComponent — resolved from inheritance chain
+                        // Match extras by associatedComponent — resolved from inheritance chain
                         val compExtras = discoveredExtras
                             .filter { it.associatedComponent == comp.name }
                             .distinctBy { it.extraKey }
+
+                        // Match deep link URIs by sourceClass — same approach as extras.
+                        // The sourceClass tells us which class the UriMatcher lives in.
+                        val compSmali = "L${comp.name.replace('.', '/')};"
+                        val compDataUris = mutableListOf<String>()
+                        val compQueryParams = mutableSetOf<String>()
+                        for (pattern in deepLinkPatterns) {
+                            if (pattern.sourceClass != compSmali) continue
+                            val uri = pattern.uriPattern
+                            if (uri.contains("://")) {
+                                compDataUris.add(uri)
+                            } else {
+                                val authority = uri.substringBefore('/')
+                                val scheme = schemeByAuthority[authority]
+                                if (scheme != null) {
+                                    compDataUris.add("$scheme://$uri")
+                                } else {
+                                    compDataUris.add(uri)
+                                }
+                            }
+                            compQueryParams.addAll(pattern.queryParameters)
+                        }
 
                         targets.add(
                             LaunchableTarget(
@@ -82,7 +145,9 @@ class IntentBuilderViewModel(
                                 actions = allActions,
                                 categories = allCategories,
                                 dataSchemes = allSchemes,
-                                discoveredExtras = compExtras
+                                discoveredExtras = compExtras,
+                                discoveredDataUris = compDataUris.distinct(),
+                                discoveredQueryParams = compQueryParams.sorted()
                             )
                         )
                     }
@@ -101,13 +166,16 @@ class IntentBuilderViewModel(
         val extras = target.discoveredExtras.map { info ->
             ExtraEntry(key = info.extraKey, value = "", type = info.extraType ?: "String")
         }
+        val queryParams = target.discoveredQueryParams.map { key ->
+            QueryParamEntry(key = key, value = "")
+        }
         _uiState.update {
-            it.copy(expandedTarget = target, extras = extras, result = null, error = null)
+            it.copy(expandedTarget = target, extras = extras, queryParams = queryParams, dataUri = "", result = null, error = null)
         }
     }
 
     fun collapseTarget() {
-        _uiState.update { it.copy(expandedTarget = null, extras = emptyList()) }
+        _uiState.update { it.copy(expandedTarget = null, extras = emptyList(), queryParams = emptyList(), dataUri = "") }
     }
 
     fun updateExtra(index: Int, entry: ExtraEntry) {
@@ -115,6 +183,18 @@ class IntentBuilderViewModel(
             val list = it.extras.toMutableList()
             if (index < list.size) list[index] = entry
             it.copy(extras = list)
+        }
+    }
+
+    fun updateDataUri(uri: String) {
+        _uiState.update { it.copy(dataUri = uri) }
+    }
+
+    fun updateQueryParam(index: Int, entry: QueryParamEntry) {
+        _uiState.update {
+            val list = it.queryParams.toMutableList()
+            if (index < list.size) list[index] = entry
+            it.copy(queryParams = list)
         }
     }
 
@@ -133,10 +213,22 @@ class IntentBuilderViewModel(
             }
         }
 
+        // Build data URI with query parameters appended
+        var dataUri = _uiState.value.dataUri.takeIf { it.isNotBlank() }
+        if (dataUri != null) {
+            val filledParams = _uiState.value.queryParams.filter { it.value.isNotBlank() }
+            if (filledParams.isNotEmpty()) {
+                val uriBuilder = Uri.parse(dataUri).buildUpon()
+                filledParams.forEach { param ->
+                    uriBuilder.appendQueryParameter(param.key, param.value)
+                }
+                dataUri = uriBuilder.build().toString()
+            }
+        }
         val action = target.actions.firstOrNull()
         val params = IntentLauncher.IntentParams(
             action = action,
-            data = null,
+            data = dataUri?.let { Uri.parse(it) },
             type = null,
             componentPackage = packageName,
             componentClass = target.component.name,
@@ -162,7 +254,7 @@ class IntentBuilderViewModel(
 
     /** Quick launch without expanding — no extras */
     fun quickLaunch(target: LaunchableTarget) {
-        _uiState.update { it.copy(expandedTarget = null, extras = emptyList()) }
+        _uiState.update { it.copy(expandedTarget = null, extras = emptyList(), queryParams = emptyList(), dataUri = "") }
         launchTarget(target)
     }
 
