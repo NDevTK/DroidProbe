@@ -12,21 +12,24 @@ Unlike tools like Drozer that require typing raw URIs and intent parameters, Dro
 
 - **App Scanner** — Lists all installed apps (including system apps) with search filtering
 - **Manifest Analysis** — Extracts exported activities, services, receivers, and providers with permissions and intent filters
-- **DEX Bytecode Analysis** — Parses APK DEX files using dexlib2 to discover:
+- **Binary Manifest Parsing** — Parses binary AndroidManifest.xml (AXML) directly from APK files for complete intent filter extraction, including deep link schemes, authorities, paths, and MIME types that `PackageManager` query methods miss
+- **DEX Bytecode Analysis** — Parses APK DEX files using dexlib2 with forward register tracking to discover:
   - Content provider URIs (`UriMatcher.addURI`, `Uri.parse`, `CONTENT_URI` fields)
+  - Deep link URI patterns with query parameters (`Uri.getQueryParameter`)
   - Intent extras with types (`getStringExtra`, `putExtra`, `Bundle.get*`)
+  - ContentProvider `call()` method names and authorities
   - FileProvider path configurations (binary XML + bytecode heuristics)
-  - Raw `content://` string constants
+  - Raw `content://` and deep link string constants
 - **Content Provider Explorer** — Discovered URIs shown as tappable cards; tap to auto-query, results in a scrollable table
-- **Intent Launcher** — Exported components grouped by type with one-tap launch; expandable extras editor with type-appropriate keyboards, pre-filled from bytecode analysis
+- **Intent Launcher** — Exported components grouped by type with one-tap launch; expandable extras editor with type-appropriate keyboards, deep link URI selector with query parameter fields, pre-filled from bytecode analysis; BROWSABLE badge highlights browser-launchable attack surfaces
 - **FileProvider Browser** — Discovered paths as tappable cards with inline probe results showing accessibility, size, MIME type, and content preview
 - **Class Hierarchy Resolution** — Extras are mapped to components via actual inheritance chain tracing, not name guessing
 
 ## How It Works
 
-1. **Manifest pass** — Reads exported components, intent filters, provider authorities, and permissions via `PackageManager`
+1. **Manifest pass** — Reads exported components, permissions, and provider authorities via `PackageManager`, then enriches intent filters by parsing binary AndroidManifest.xml (AXML) from the APK for complete action/category/data coverage
 2. **DEX pass 1** — Builds a class hierarchy map (`class -> superclass`) from all DEX classes
-3. **DEX pass 2** — Scans bytecode with four extractors: `UriPatternExtractor`, `IntentExtraExtractor`, `FileProviderExtractor`, `StringConstantCollector`
+3. **DEX pass 2** — Scans bytecode with five extractors using forward register tracking: `UriPatternExtractor`, `IntentExtraExtractor`, `FileProviderExtractor`, `ContentProviderCallExtractor`, `StringConstantCollector`
 4. **Inheritance resolution** — Maps discovered extras to exported components by walking the inheritance chain (handles inner classes, base classes, and superclass propagation)
 5. **Interactive GUI** — Pre-populates three interaction screens from analysis results
 
@@ -57,12 +60,15 @@ Unlike tools like Drozer that require typing raw URIs and intent parameters, Dro
 ```
 app/src/main/java/com/droidprobe/app/
 ├── analysis/
-│   ├── manifest/ManifestAnalyzer.kt        # PackageManager-based manifest extraction
+│   ├── manifest/
+│   │   ├── ManifestAnalyzer.kt             # PackageManager + binary XML manifest extraction
+│   │   └── BinaryManifestParser.kt         # AXML parser for complete intent filters
 │   └── dex/
 │       ├── DexAnalyzer.kt                  # Orchestrates DEX analysis with class hierarchy
-│       ├── UriPatternExtractor.kt          # Content provider URI discovery
+│       ├── UriPatternExtractor.kt          # Content provider & deep link URI discovery
 │       ├── IntentExtraExtractor.kt         # Intent extras with inheritance resolution
 │       ├── FileProviderExtractor.kt        # FileProvider path config extraction
+│       ├── ContentProviderCallExtractor.kt # ContentResolver.call() detection
 │       └── StringConstantCollector.kt      # Brute-force string constant collection
 ├── data/
 │   ├── model/                              # AppInfo, ManifestAnalysis, DexAnalysis, etc.
