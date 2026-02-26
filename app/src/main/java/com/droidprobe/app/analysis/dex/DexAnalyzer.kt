@@ -59,6 +59,16 @@ class DexAnalyzer {
         val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses)
         val callExtractor = ContentProviderCallExtractor()
 
+        // --- Pass 1.5: Pre-scan for URI parameter wrapper methods ---
+        // Detects methods that internally call getQueryParameter/getBooleanQueryParameter
+        // with a parameter-sourced key, enabling inter-procedural param detection.
+        for (dexFile in dexFiles) {
+            for (classDef in dexFile.classes) {
+                if (isFrameworkClass(classDef.type)) continue
+                uriExtractor.preScanForWrappers(classDef)
+            }
+        }
+
         // --- Pass 2: Extract data from all classes ---
         for ((dexIndex, dexFile) in dexFiles.withIndex()) {
             val classes = dexFile.classes.toList()
@@ -77,6 +87,9 @@ class DexAnalyzer {
                     )
                 )
 
+                DexDebugLog.logVerbose(className,
+                    "[DexAnalyzer] Processing class $className (dex ${dexIndex + 1}, class ${classIndex + 1}/${classes.size})")
+
                 stringCollector.process(classDef)
                 uriExtractor.process(classDef)
                 intentExtractor.process(classDef)
@@ -88,9 +101,22 @@ class DexAnalyzer {
         // Resolve extras in superclasses to their component descendants
         val resolvedExtras = intentExtractor.resolveSuperclassExtras()
 
+        val uriResults = uriExtractor.getResults()
+        DexDebugLog.log("[DexAnalyzer] Analysis complete: " +
+            "${uriResults.size} URIs, ${resolvedExtras.size} extras, " +
+            "${fileProviderExtractor.getResults().size} fileProvider paths")
+        // Log query params summary for debugging
+        for (uri in uriResults) {
+            if (uri.queryParameters.isNotEmpty() || uri.queryParameterValues.isNotEmpty()) {
+                DexDebugLog.logFiltered(uri.sourceClass, null,
+                    "[DexAnalyzer] URI \"${uri.uriPattern}\" params=${uri.queryParameters} " +
+                    "values=${uri.queryParameterValues} defaults=${uri.queryParameterDefaults}")
+            }
+        }
+
         DexAnalysis(
             packageName = manifestAnalysis.packageName,
-            contentProviderUris = uriExtractor.getResults(),
+            contentProviderUris = uriResults,
             intentExtras = resolvedExtras,
             fileProviderPaths = fileProviderExtractor.getResults(),
             rawContentUriStrings = stringCollector.getContentUriStrings(),

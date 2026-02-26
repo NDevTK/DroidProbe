@@ -1,13 +1,19 @@
 package com.droidprobe.app.analysis.dex
 
+import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedMethod
+import com.android.tools.smali.dexlib2.iface.MethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.SwitchPayload
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
+import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.droidprobe.app.data.model.ContentProviderInfo
@@ -29,29 +35,207 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
 
     private val results = mutableListOf<ContentProviderInfo>()
     private val seenUris = mutableSetOf<String>()
+    // For safe wildcard dedup: normalized URI → match code. Only dedup # vs * when match codes match.
+    private val seenNormalizedByMatchCode = mutableMapOf<String, Int>()
     private val knownAuthorities = manifestAnalysis.providers.mapNotNull { it.authority }.toSet()
+    // Unscoped: params from methods without UriMatcher dispatch (helper methods)
     private val queryParamsByClass = mutableMapOf<String, MutableSet<String>>()
     private val queryParamValuesByClass = mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
+    // Scoped: params associated with specific UriMatcher match codes via CFG reachability
+    private val queryParamsByMatchCode = mutableMapOf<Int, MutableSet<String>>()
+    private val queryParamValuesByMatchCode = mutableMapOf<Int, MutableMap<String, MutableSet<String>>>()
+    // Inter-procedural: classes instantiated under specific match codes in dispatch methods.
+    // Used to pull in class-level params from helper/handler classes (e.g. bwn for alarm/create).
+    private val classesForMatchCode = mutableMapOf<Int, MutableSet<String>>()
+
+    /**
+     * Inter-procedural: wrapper method summaries.
+     * Maps method signature → summary of which argument positions carry the
+     * query parameter key and (optionally) the default value.
+     */
+    private data class WrapperSummary(
+        val keyArgWordPos: Int,
+        val defaultArgWordPos: Int? = null,
+        val isBooleanWrapper: Boolean = false
+    )
+    private val wrapperSummaries = mutableMapOf<String, WrapperSummary>()
+
+    // Default values for query parameters (param name → default value string)
+    private val queryParamDefaultsByMatchCode = mutableMapOf<Int, MutableMap<String, String>>()
+    private val queryParamDefaultsByClass = mutableMapOf<String, MutableMap<String, String>>()
+
+    /**
+     * Pre-scan pass: detect methods that are wrappers around getQueryParameter /
+     * getBooleanQueryParameter and record which argument carries the param key.
+     * Must be called for all classes BEFORE the main process() pass.
+     */
+    fun preScanForWrappers(classDef: DexBackedClassDef) {
+        for (method in classDef.methods) {
+            val impl = method.implementation ?: continue
+            val instructions = impl.instructions.toList()
+            if (instructions.isEmpty()) continue
+
+            // Check if this method has a Uri parameter
+            val paramTypes = method.parameterTypes.toList()
+            if (!paramTypes.contains("Landroid/net/Uri;")) continue
+
+            // Build parameter register → explicit parameter index mapping
+            val isStatic = (method.accessFlags and AccessFlags.STATIC.value) != 0
+            val paramRegToIndex = buildParamRegisterMap(isStatic, paramTypes, impl.registerCount)
+
+            // Scan for getQueryParameter/getBooleanQueryParameter calls
+            for (instr in instructions) {
+                if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+                val ref = instr.reference
+                if (ref !is MethodReference) continue
+
+                val isGQP = ref.definingClass == "Landroid/net/Uri;" &&
+                        (ref.name == "getQueryParameter" || ref.name == "getQueryParameters")
+                val isBQP = ref.definingClass == "Landroid/net/Uri;" &&
+                        ref.name == "getBooleanQueryParameter"
+
+                if (!isGQP && !isBQP) continue
+
+                // getQueryParameter: invoke-virtual {uri, key} → key is registerD
+                // getBooleanQueryParameter: invoke-virtual {uri, key, default} → key is registerD
+                val keyReg = instr.registerD
+                val paramIndex = paramRegToIndex[keyReg] ?: continue
+
+                // Compute the argument word position in the invoke instruction at call sites.
+                val argWord = computeArgWordPosition(isStatic, paramTypes, paramIndex)
+
+                // Detect default value parameter position
+                var defaultArgWord: Int? = null
+                var isBooleanWrapper = false
+
+                if (isBQP) {
+                    // getBooleanQueryParameter: registerE is the default (boolean).
+                    // Check if it maps to a method parameter.
+                    isBooleanWrapper = true
+                    val defaultParamIndex = paramRegToIndex[instr.registerE]
+                    if (defaultParamIndex != null) {
+                        defaultArgWord = computeArgWordPosition(isStatic, paramTypes, defaultParamIndex)
+                    }
+                } else {
+                    // getQueryParameter: look for a third parameter (not Uri, not key)
+                    // as a potential default value (common wrapper pattern).
+                    val uriParamIndex = paramTypes.indexOfFirst { it.toString() == "Landroid/net/Uri;" }
+                    val otherIndices = paramTypes.indices.filter { it != uriParamIndex && it != paramIndex }
+                    if (otherIndices.size == 1) {
+                        val defIdx = otherIndices[0]
+                        defaultArgWord = computeArgWordPosition(isStatic, paramTypes, defIdx)
+                    }
+                }
+
+                val sig = buildMethodSignature(method)
+                wrapperSummaries[sig] = WrapperSummary(argWord, defaultArgWord, isBooleanWrapper)
+                DexDebugLog.log("[WrapperSummary] ${classDef.type}->${method.name}: " +
+                    "param[$paramIndex] is query key → argWord=$argWord, " +
+                    "defaultArgWord=$defaultArgWord, boolean=$isBooleanWrapper")
+                break // one summary per method is enough
+            }
+        }
+    }
+
+    /** Maps register number → explicit parameter index (0-based, not counting `this`). */
+    private fun buildParamRegisterMap(
+        isStatic: Boolean,
+        paramTypes: List<CharSequence>,
+        registerCount: Int
+    ): Map<Int, Int> {
+        var totalParamWords = if (isStatic) 0 else 1
+        for (type in paramTypes) {
+            totalParamWords += if (type == "J" || type == "D") 2 else 1
+        }
+
+        val firstParamReg = registerCount - totalParamWords
+        val map = mutableMapOf<Int, Int>()
+
+        var reg = firstParamReg
+        if (!isStatic) reg++ // skip `this`
+
+        for (i in paramTypes.indices) {
+            map[reg] = i
+            reg += if (paramTypes[i] == "J" || paramTypes[i] == "D") 2 else 1
+        }
+
+        return map
+    }
+
+    /**
+     * Compute the argument word position in an invoke instruction for a given
+     * explicit parameter index. Accounts for `this` (virtual) and wide types.
+     */
+    private fun computeArgWordPosition(
+        isStatic: Boolean,
+        paramTypes: List<CharSequence>,
+        paramIndex: Int
+    ): Int {
+        var pos = if (isStatic) 0 else 1 // skip `this` for virtual
+        for (i in 0 until paramIndex) {
+            pos += if (paramTypes[i] == "J" || paramTypes[i] == "D") 2 else 1
+        }
+        return pos
+    }
+
+    /** Build a unique method signature string from a DexBackedMethod. */
+    private fun buildMethodSignature(method: DexBackedMethod): String {
+        val params = method.parameterTypes.joinToString("")
+        return "${method.definingClass}->${method.name}($params)${method.returnType}"
+    }
+
+    /** Build a unique method signature string from a MethodReference. */
+    private fun buildMethodSignatureFromRef(ref: MethodReference): String {
+        val params = ref.parameterTypes.joinToString("")
+        return "${ref.definingClass}->${ref.name}($params)${ref.returnType}"
+    }
 
     fun process(classDef: DexBackedClassDef) {
         checkStaticFields(classDef)
         for (method in classDef.methods) {
             val impl = method.implementation ?: continue
             val instructions = impl.instructions.toList()
-            scanMethod(classDef, method, instructions)
+            scanMethod(classDef, method, impl, instructions)
         }
     }
 
     fun getResults(): List<ContentProviderInfo> {
         return results.map { info ->
-            val params = queryParamsByClass[info.sourceClass]
-            val paramValues = queryParamValuesByClass[info.sourceClass]
-            if (params != null && params.isNotEmpty()) {
+            val params = mutableSetOf<String>()
+            val paramValues = mutableMapOf<String, MutableSet<String>>()
+            val defaults = mutableMapOf<String, String>()
+
+            // 1. Match-code-scoped params (from dispatch methods with UriMatcher)
+            if (info.matchCode != null) {
+                queryParamsByMatchCode[info.matchCode]?.let { params.addAll(it) }
+                queryParamValuesByMatchCode[info.matchCode]?.forEach { (param, vals) ->
+                    paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+                }
+                queryParamDefaultsByMatchCode[info.matchCode]?.let { defaults.putAll(it) }
+
+                // 1b. Inter-procedural: params from classes instantiated under this match code.
+                classesForMatchCode[info.matchCode]?.forEach { assocClass ->
+                    queryParamsByClass[assocClass]?.let { params.addAll(it) }
+                    queryParamValuesByClass[assocClass]?.forEach { (param, vals) ->
+                        paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+                    }
+                    queryParamDefaultsByClass[assocClass]?.let { defaults.putAll(it) }
+                }
+            }
+
+            // 2. Class-level params (from helper methods without dispatch context)
+            queryParamsByClass[info.sourceClass]?.let { params.addAll(it) }
+            queryParamValuesByClass[info.sourceClass]?.forEach { (param, vals) ->
+                paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+            }
+            queryParamDefaultsByClass[info.sourceClass]?.let { defaults.putAll(it) }
+
+            if (params.isNotEmpty()) {
                 info.copy(
                     queryParameters = params.toList().sorted(),
                     queryParameterValues = paramValues
-                        ?.mapValues { (_, values) -> values.toList().sorted() }
-                        ?: emptyMap()
+                        .mapValues { (_, values) -> values.toList().sorted() },
+                    queryParameterDefaults = defaults
                 )
             } else {
                 info
@@ -74,10 +258,11 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         val impl = clinit.implementation ?: return
         val instructions = impl.instructions.toList()
 
-        // Forward tracking for <clinit> too
-        val regStrings = mutableMapOf<Int, String>()
-        for (instr in instructions) {
-            trackStringRegisters(instr, regStrings)
+        // Use CFG-based tracking for <clinit> too
+        val cfg = MethodCFG(instructions, impl.tryBlocks)
+        val cfgStrings = cfg.computeStringRegisters()
+
+        for ((i, instr) in instructions.withIndex()) {
             if (instr is ReferenceInstruction) {
                 val ref = instr.reference
                 if (ref is MethodReference &&
@@ -86,6 +271,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                     instr.opcode in listOf(Opcode.INVOKE_STATIC, Opcode.INVOKE_STATIC_RANGE)
                 ) {
                     if (instr is Instruction35c) {
+                        val regStrings = cfgStrings[i] ?: continue
                         val uri = regStrings[instr.registerC]
                         if (uri != null && uri.contains("://")) {
                             addResult(uri, null, classDef, "<clinit>")
@@ -99,37 +285,57 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     private fun scanMethod(
         classDef: DexBackedClassDef,
         method: DexBackedMethod,
+        impl: MethodImplementation,
         instructions: List<Instruction>
     ) {
-        val regStrings = mutableMapOf<Int, String>()
+        // Build CFG and compute string register state via forward dataflow.
+        // This properly handles branches: registers overwritten on dead paths
+        // (after return/throw) don't corrupt the state at live instructions.
+        val cfg = MethodCFG(instructions, impl.tryBlocks)
+        val cfgStrings = cfg.computeStringRegisters()
+
+        // Detect UriMatcher dispatch: match() → switch/if-eq on match register.
+        // This lets us scope getQueryParameter calls to specific match codes.
+        val matchDispatch = detectMatchDispatch(instructions, cfg)
+
         val regInts = mutableMapOf<Int, Int>()
 
         for ((i, instr) in instructions.withIndex()) {
-            trackStringRegisters(instr, regStrings)
             trackIntRegisters(instr, regInts)
 
             if (instr !is ReferenceInstruction) continue
             val ref = instr.reference
             if (ref !is MethodReference) continue
 
+            // Use CFG-computed string state at this instruction index
+            val regStrings = cfgStrings[i] ?: emptyMap()
+
             when {
                 isUriMatcherAddUri(ref) -> handleAddUri(regStrings, regInts, instr, classDef, method)
                 isUriParse(ref) -> handleUriParse(regStrings, instr, classDef, method)
                 isContentUrisWithAppendedId(ref) -> handleContentUris(regStrings, instr, classDef, method)
-                isGetQueryParameter(ref) -> handleGetQueryParameter(regStrings, instr, instructions, i, classDef)
+                isGetQueryParameter(ref) -> handleGetQueryParameter(ref, regStrings, instr, instructions, i, classDef, cfgStrings, matchDispatch)
+                isGetBooleanQueryParameter(ref) -> handleGetBooleanQueryParameter(regStrings, regInts, instr, i, classDef, matchDispatch)
+                else -> handleWrapperCallSite(ref, regStrings, regInts, instr, i, classDef, matchDispatch)
             }
-        }
-    }
 
-    /**
-     * Track const-string / const-string/jumbo instructions into the register→string map.
-     */
-    private fun trackStringRegisters(instr: Instruction, regStrings: MutableMap<Int, String>) {
-        if (instr.opcode == Opcode.CONST_STRING || instr.opcode == Opcode.CONST_STRING_JUMBO) {
-            if (instr is OneRegisterInstruction && instr is ReferenceInstruction) {
-                val ref = instr.reference
-                if (ref is StringReference) {
-                    regStrings[instr.registerA] = ref.string
+            // Inter-procedural: track classes instantiated under specific match codes.
+            // When a dispatch method does `new Foo(uri, ...)` under match code X,
+            // Foo's class-level params should be associated with match code X.
+            if (matchDispatch != null && ref.name == "<init>" &&
+                instr.opcode in listOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE)
+            ) {
+                val targetClass = ref.definingClass
+                // Only track non-framework classes that take a Uri parameter
+                if (ref.parameterTypes.any { it.toString() == "Landroid/net/Uri;" }) {
+                    val matchCodes = findMatchCodesForInstruction(i, matchDispatch)
+                    if (matchCodes.isNotEmpty()) {
+                        for (code in matchCodes) {
+                            classesForMatchCode.getOrPut(code) { mutableSetOf() }.add(targetClass)
+                        }
+                        DexDebugLog.log("[UriParam] Constructor association: $targetClass " +
+                            "instantiated under matchCodes=$matchCodes")
+                    }
                 }
             }
         }
@@ -223,33 +429,217 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         }
     }
 
-    // --- Strategy 4: Uri.getQueryParameter / getQueryParameters ---
+    // --- Strategy 4: Uri.getQueryParameter / getQueryParameters / getBooleanQueryParameter ---
 
     private fun isGetQueryParameter(ref: MethodReference): Boolean {
         return ref.definingClass == "Landroid/net/Uri;" &&
                 (ref.name == "getQueryParameter" || ref.name == "getQueryParameters")
     }
 
+    private fun isGetBooleanQueryParameter(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/net/Uri;" &&
+                ref.name == "getBooleanQueryParameter"
+    }
+
     private fun handleGetQueryParameter(
+        ref: MethodReference,
         regStrings: Map<Int, String>,
         instr: Instruction,
         instructions: List<Instruction>,
         callIndex: Int,
-        classDef: DexBackedClassDef
+        classDef: DexBackedClassDef,
+        cfgStrings: Array<Map<Int, String>?>,
+        matchDispatch: MatchDispatchInfo?
     ) {
         if (instr !is Instruction35c) return
         val paramName = regStrings[instr.registerD] ?: return
         if (paramName.isBlank()) return
-        queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
 
-        // Scan forward for String.equals / TextUtils.equals on the result
         val resultReg = getMoveResultRegister(instructions, callIndex) ?: return
-        val values = scanForwardForStringValues(instructions, callIndex + 2, resultReg, regStrings)
+        val isPlural = ref.name == "getQueryParameters"
+
+        // Determine which match codes can reach this getQueryParameter via CFG
+        val matchCodes = if (matchDispatch != null) {
+            findMatchCodesForInstruction(callIndex, matchDispatch)
+        } else {
+            emptySet()
+        }
+
+        DexDebugLog.logFiltered(classDef.type, paramName,
+            "[UriParam] ${ref.name}(\"$paramName\") at index=$callIndex " +
+            "resultReg=v$resultReg plural=$isPlural matchCodes=$matchCodes class=${classDef.type}")
+
+        val values = if (isPlural) {
+            scanForwardForListElementValues(instructions, callIndex + 2, resultReg, cfgStrings, classDef.type, paramName)
+        } else {
+            scanForwardForStringValues(instructions, callIndex + 2, resultReg, regStrings, classDef.type, paramName)
+        }
+
+        if (matchCodes.isNotEmpty()) {
+            // Scoped: associate param with specific match codes
+            for (code in matchCodes) {
+                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                if (values.isNotEmpty()) {
+                    queryParamValuesByMatchCode
+                        .getOrPut(code) { mutableMapOf() }
+                        .getOrPut(paramName) { mutableSetOf() }
+                        .addAll(values)
+                }
+            }
+        } else {
+            // Unscoped: class-level fallback (helper methods without dispatch context)
+            queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
+            if (values.isNotEmpty()) {
+                queryParamValuesByClass
+                    .getOrPut(classDef.type) { mutableMapOf() }
+                    .getOrPut(paramName) { mutableSetOf() }
+                    .addAll(values)
+            }
+        }
+
         if (values.isNotEmpty()) {
-            queryParamValuesByClass
-                .getOrPut(classDef.type) { mutableMapOf() }
-                .getOrPut(paramName) { mutableSetOf() }
-                .addAll(values)
+            DexDebugLog.logFiltered(classDef.type, paramName,
+                "[UriParam] FINAL values for \"$paramName\": $values (matchCodes=$matchCodes)")
+        }
+    }
+
+    /**
+     * Handle Uri.getBooleanQueryParameter(key, defaultValue).
+     * Extracts the parameter name and the boolean default value.
+     */
+    private fun handleGetBooleanQueryParameter(
+        regStrings: Map<Int, String>,
+        regInts: Map<Int, Int>,
+        instr: Instruction,
+        callIndex: Int,
+        classDef: DexBackedClassDef,
+        matchDispatch: MatchDispatchInfo?
+    ) {
+        if (instr !is Instruction35c) return
+        // getBooleanQueryParameter(String key, boolean default)
+        // registerC = uri, registerD = key, registerE = default
+        val paramName = regStrings[instr.registerD] ?: return
+        if (paramName.isBlank()) return
+
+        // Extract the boolean default value (0 = false, 1 = true)
+        val defaultInt = regInts[instr.registerE]
+        val defaultStr = if (defaultInt != null) (defaultInt != 0).toString() else null
+
+        val matchCodes = if (matchDispatch != null) {
+            findMatchCodesForInstruction(callIndex, matchDispatch)
+        } else {
+            emptySet()
+        }
+
+        DexDebugLog.logFiltered(classDef.type, paramName,
+            "[UriParam] getBooleanQueryParameter(\"$paramName\", default=$defaultStr) at index=$callIndex " +
+            "matchCodes=$matchCodes class=${classDef.type}")
+
+        if (matchCodes.isNotEmpty()) {
+            for (code in matchCodes) {
+                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                if (defaultStr != null) {
+                    queryParamDefaultsByMatchCode
+                        .getOrPut(code) { mutableMapOf() }[paramName] = defaultStr
+                }
+            }
+        } else {
+            queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
+            if (defaultStr != null) {
+                queryParamDefaultsByClass
+                    .getOrPut(classDef.type) { mutableMapOf() }[paramName] = defaultStr
+            }
+        }
+    }
+
+    // --- Strategy 5: Wrapper method call sites (inter-procedural) ---
+
+    /**
+     * Check if this invoke calls a summarized wrapper method. If so, resolve the
+     * query param key and optional default value from the caller's registers.
+     */
+    private fun handleWrapperCallSite(
+        ref: MethodReference,
+        regStrings: Map<Int, String>,
+        regInts: Map<Int, Int>,
+        instr: Instruction,
+        callIndex: Int,
+        classDef: DexBackedClassDef,
+        matchDispatch: MatchDispatchInfo?
+    ) {
+        val sig = buildMethodSignatureFromRef(ref)
+        val summary = wrapperSummaries[sig] ?: return
+
+        // Extract the register at the given argument word position
+        val keyReg = getInvokeRegisterAtPosition(instr, summary.keyArgWordPos) ?: return
+        val paramName = regStrings[keyReg] ?: return
+        if (paramName.isBlank()) return
+
+        // Resolve default value if available
+        var defaultStr: String? = null
+        if (summary.defaultArgWordPos != null) {
+            val defaultReg = getInvokeRegisterAtPosition(instr, summary.defaultArgWordPos)
+            if (defaultReg != null) {
+                // Try string first (for getQueryParameter wrappers with String default)
+                defaultStr = regStrings[defaultReg]
+                if (defaultStr == null) {
+                    // Try int/boolean (for getBooleanQueryParameter wrappers)
+                    val intVal = regInts[defaultReg]
+                    if (intVal != null) {
+                        defaultStr = if (summary.isBooleanWrapper) (intVal != 0).toString() else intVal.toString()
+                    }
+                }
+            }
+        }
+
+        val matchCodes = if (matchDispatch != null) {
+            findMatchCodesForInstruction(callIndex, matchDispatch)
+        } else {
+            emptySet()
+        }
+
+        DexDebugLog.logFiltered(classDef.type, paramName,
+            "[UriParam] wrapper ${ref.definingClass}->${ref.name}(\"$paramName\", default=$defaultStr) " +
+            "at index=$callIndex matchCodes=$matchCodes class=${classDef.type}")
+
+        if (matchCodes.isNotEmpty()) {
+            for (code in matchCodes) {
+                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                if (defaultStr != null) {
+                    queryParamDefaultsByMatchCode
+                        .getOrPut(code) { mutableMapOf() }[paramName] = defaultStr
+                }
+            }
+        } else {
+            queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
+            if (defaultStr != null) {
+                queryParamDefaultsByClass
+                    .getOrPut(classDef.type) { mutableMapOf() }[paramName] = defaultStr
+            }
+        }
+    }
+
+    /**
+     * Extract the register number at a given argument word position from an invoke instruction.
+     * For Instruction35c: positions 0-4 map to registerC through registerG.
+     * For Instruction3rc (invoke-range): position maps to startRegister + position.
+     */
+    private fun getInvokeRegisterAtPosition(instr: Instruction, argWordPos: Int): Int? {
+        return when (instr) {
+            is Instruction35c -> when (argWordPos) {
+                0 -> instr.registerC
+                1 -> instr.registerD
+                2 -> instr.registerE
+                3 -> instr.registerF
+                4 -> instr.registerG
+                else -> null
+            }
+            is Instruction3rc -> {
+                if (argWordPos < instr.registerCount) {
+                    instr.startRegister + argWordPos
+                } else null
+            }
+            else -> null
         }
     }
 
@@ -265,18 +655,48 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     /**
      * Scan forward from a getQueryParameter result for String.equals / TextUtils.equals
      * comparisons, extracting the compared string constants.
+     *
+     * Uses a live copy of regStrings that gets updated during the forward scan:
+     * - const-string instructions add/update entries (register now holds a new string)
+     * - Non-const-string writes remove entries (register no longer holds a string)
+     * This gives long-distance tracking (values loaded far back in the method) with
+     * overwrite awareness (stale values are invalidated).
      */
     private fun scanForwardForStringValues(
         instructions: List<Instruction>,
         startIndex: Int,
         resultReg: Int,
-        regStrings: Map<Int, String>
+        regStrings: Map<Int, String>,
+        sourceClass: String? = null,
+        paramName: String? = null
     ): List<String> {
         val values = mutableSetOf<String>()
-        val limit = minOf(instructions.size, startIndex + 40)
+        val liveStrings = regStrings.toMutableMap()
+        val limit = minOf(instructions.size, startIndex + 30)
 
         for (i in startIndex until limit) {
             val instr = instructions[i]
+
+            // Update live register tracking: add const-strings, remove overwrites
+            trackStringRegistersLive(instr, liveStrings)
+
+            // Stop at method exits / throws — definitely a different context
+            if (instr.opcode in CONTROL_FLOW_STOPS) {
+                DexDebugLog.logFiltered(sourceClass, paramName,
+                    "[UriParam]   STOP control flow at +${i - startIndex} " +
+                    "by ${instr.opcode} — ending scan")
+                break
+            }
+
+            // Stop if resultReg is overwritten — any further equals() on this
+            // register is comparing a different value, not the query parameter.
+            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction && instr.registerA == resultReg) {
+                DexDebugLog.logFiltered(sourceClass, paramName,
+                    "[UriParam]   STOP v$resultReg overwritten at +${i - startIndex} " +
+                    "by ${instr.opcode} — ending scan")
+                break
+            }
+
             if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
             val ref = instr.reference
             if (ref !is MethodReference) continue
@@ -285,21 +705,290 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 ref.definingClass == "Ljava/lang/String;" &&
                         (ref.name == "equals" || ref.name == "equalsIgnoreCase") -> {
                     if (instr.registerC == resultReg) {
-                        regStrings[instr.registerD]?.let { values.add(it) }
+                        val matched = liveStrings[instr.registerD]
+                        DexDebugLog.logFiltered(sourceClass, paramName,
+                            "[UriParam]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=resultReg, " +
+                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
+                        matched?.let { values.add(it) }
                     } else if (instr.registerD == resultReg) {
-                        regStrings[instr.registerC]?.let { values.add(it) }
+                        val matched = liveStrings[instr.registerC]
+                        DexDebugLog.logFiltered(sourceClass, paramName,
+                            "[UriParam]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=${matched ?: "??"}, " +
+                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
+                        matched?.let { values.add(it) }
                     }
                 }
                 ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals" -> {
                     if (instr.registerC == resultReg) {
-                        regStrings[instr.registerD]?.let { values.add(it) }
+                        val matched = liveStrings[instr.registerD]
+                        DexDebugLog.logFiltered(sourceClass, paramName,
+                            "[UriParam]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=resultReg, " +
+                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
+                        matched?.let { values.add(it) }
                     } else if (instr.registerD == resultReg) {
-                        regStrings[instr.registerC]?.let { values.add(it) }
+                        val matched = liveStrings[instr.registerC]
+                        DexDebugLog.logFiltered(sourceClass, paramName,
+                            "[UriParam]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=${matched ?: "??"}, " +
+                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
+                        matched?.let { values.add(it) }
                     }
                 }
             }
         }
         return values.toList()
+    }
+
+    /**
+     * Scan forward from a getQueryParameters (plural) result for string values.
+     *
+     * The result register holds a List<String>. Individual elements are accessed
+     * via List.get(int) or Iterator.next(). We track those element registers and
+     * then match String.equals / TextUtils.equals on them, using cfgStrings to
+     * resolve the compared constant at each call site.
+     */
+    private fun scanForwardForListElementValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        listReg: Int,
+        cfgStrings: Array<Map<Int, String>?>,
+        sourceClass: String? = null,
+        paramName: String? = null
+    ): List<String> {
+        val values = mutableSetOf<String>()
+        val elementRegs = mutableSetOf<Int>()
+        val iteratorRegs = mutableSetOf<Int>()
+
+        for (i in startIndex until instructions.size) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+
+            // List.get(int) on the list register → element register
+            if (ref.name == "get" && ref.definingClass == "Ljava/util/List;" &&
+                instr.registerC == listReg
+            ) {
+                val elemReg = getMoveResultRegister(instructions, i)
+                if (elemReg != null) {
+                    elementRegs.add(elemReg)
+                    DexDebugLog.logFiltered(sourceClass, paramName,
+                        "[UriParam]   List.get() at +${i - startIndex} → elementReg=v$elemReg")
+                }
+            }
+
+            // List.iterator() / Collection.iterator() on the list register
+            if (ref.name == "iterator" && instr.registerC == listReg) {
+                val iterReg = getMoveResultRegister(instructions, i)
+                if (iterReg != null) {
+                    iteratorRegs.add(iterReg)
+                    DexDebugLog.logFiltered(sourceClass, paramName,
+                        "[UriParam]   iterator() at +${i - startIndex} → iterReg=v$iterReg")
+                }
+            }
+
+            // Iterator.next() on a tracked iterator → element register
+            if (ref.name == "next" && instr.registerC in iteratorRegs) {
+                val elemReg = getMoveResultRegister(instructions, i)
+                if (elemReg != null) {
+                    elementRegs.add(elemReg)
+                    DexDebugLog.logFiltered(sourceClass, paramName,
+                        "[UriParam]   Iterator.next() at +${i - startIndex} → elementReg=v$elemReg")
+                }
+            }
+
+            if (elementRegs.isEmpty()) continue
+
+            // String.equals / equalsIgnoreCase on an element register
+            val isEquals = (ref.definingClass == "Ljava/lang/String;" &&
+                    (ref.name == "equals" || ref.name == "equalsIgnoreCase")) ||
+                    (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals")
+            if (!isEquals) continue
+
+            val strings = cfgStrings[i] ?: continue
+            if (instr.registerC in elementRegs) {
+                val matched = strings[instr.registerD]
+                DexDebugLog.logFiltered(sourceClass, paramName,
+                    "[UriParam]   +${i - startIndex}: ${ref.name}(v${instr.registerC}=elem, " +
+                    "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
+                if (matched != null) values.add(matched)
+            } else if (instr.registerD in elementRegs) {
+                val matched = strings[instr.registerC]
+                DexDebugLog.logFiltered(sourceClass, paramName,
+                    "[UriParam]   +${i - startIndex}: ${ref.name}(v${instr.registerC}=${matched ?: "??"}, " +
+                    "v${instr.registerD}=elem) → ${if (matched != null) "HIT" else "miss"}")
+                if (matched != null) values.add(matched)
+            }
+        }
+
+        return values.toList()
+    }
+
+    /**
+     * Update live register tracking during forward scan:
+     * const-string adds entries, any other register-writing opcode invalidates.
+     * Uses dexlib2's Opcode.setsRegister() flag for complete coverage.
+     */
+    private fun trackStringRegistersLive(instr: Instruction, liveStrings: MutableMap<Int, String>) {
+        val op = instr.opcode
+        if (op == Opcode.CONST_STRING || op == Opcode.CONST_STRING_JUMBO) {
+            if (instr is OneRegisterInstruction && instr is ReferenceInstruction) {
+                val ref = instr.reference
+                if (ref is StringReference) {
+                    liveStrings[instr.registerA] = ref.string
+                    return
+                }
+            }
+        }
+        if (op.setsRegister() && instr is OneRegisterInstruction) {
+            liveStrings.remove(instr.registerA)
+        }
+    }
+
+    // --- Match code dispatch detection (CFG-based) ---
+
+    /**
+     * Holds the CFG predecessor edges and the mapping from dispatch target
+     * instruction indices to the match code values that reach them.
+     */
+    private class MatchDispatchInfo(
+        val predecessors: Array<List<Int>>,
+        val dispatchTargets: Map<Int, Set<Int>>  // targetInstructionIndex → Set<matchCode>
+    )
+
+    /**
+     * Detects UriMatcher.match() → packed-switch/sparse-switch/if-eq dispatch
+     * in a method, and builds a map of which instruction indices are dispatch
+     * targets for which match code values.
+     *
+     * Returns null if no UriMatcher dispatch is found in this method.
+     */
+    private fun detectMatchDispatch(
+        instructions: List<Instruction>,
+        cfg: MethodCFG
+    ): MatchDispatchInfo? {
+        val n = instructions.size
+
+        // Find UriMatcher.match() → move-result matchReg
+        var matchReg: Int? = null
+        for ((i, instr) in instructions.withIndex()) {
+            if (instr is ReferenceInstruction) {
+                val ref = instr.reference
+                if (ref is MethodReference &&
+                    ref.definingClass == "Landroid/content/UriMatcher;" &&
+                    ref.name == "match"
+                ) {
+                    matchReg = getMoveResultRegister(instructions, i)
+                    break
+                }
+            }
+        }
+        if (matchReg == null) return null
+
+        // Scan linearly to find dispatch instructions on matchReg.
+        // Linear int tracking works here because the if-eq/switch chain
+        // is on the fall-through path with const loads interleaved.
+        val localRegInts = mutableMapOf<Int, Int>()
+        val dispatchTargets = mutableMapOf<Int, MutableSet<Int>>()
+
+        for ((i, instr) in instructions.withIndex()) {
+            trackIntRegisters(instr, localRegInts)
+            val op = instr.opcode
+
+            // packed-switch / sparse-switch on matchReg
+            if ((op == Opcode.PACKED_SWITCH || op == Opcode.SPARSE_SWITCH) &&
+                instr is OneRegisterInstruction && instr.registerA == matchReg &&
+                instr is OffsetInstruction
+            ) {
+                val payloadAddr = cfg.instructionAddress(i) + instr.codeOffset
+                val payloadIdx = cfg.instructionIndex(payloadAddr)
+                if (payloadIdx >= 0) {
+                    val payload = instructions[payloadIdx]
+                    if (payload is SwitchPayload) {
+                        for (elem in payload.switchElements) {
+                            val targetAddr = cfg.instructionAddress(i) + elem.offset
+                            val targetIdx = cfg.instructionIndex(targetAddr)
+                            if (targetIdx >= 0) {
+                                dispatchTargets.getOrPut(targetIdx) { mutableSetOf() }.add(elem.key)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // if-eq matchReg, constReg, :target → branch target = constValue
+            if (op == Opcode.IF_EQ && instr is TwoRegisterInstruction && instr is OffsetInstruction) {
+                val constValue: Int? = when {
+                    instr.registerA == matchReg -> localRegInts[instr.registerB]
+                    instr.registerB == matchReg -> localRegInts[instr.registerA]
+                    else -> null
+                }
+                if (constValue != null) {
+                    val targetAddr = cfg.instructionAddress(i) + instr.codeOffset
+                    val targetIdx = cfg.instructionIndex(targetAddr)
+                    if (targetIdx >= 0) {
+                        dispatchTargets.getOrPut(targetIdx) { mutableSetOf() }.add(constValue)
+                    }
+                }
+            }
+
+            // if-ne matchReg, constReg, :target → fall-through (i+1) = constValue
+            if (op == Opcode.IF_NE && instr is TwoRegisterInstruction && instr is OffsetInstruction) {
+                val constValue: Int? = when {
+                    instr.registerA == matchReg -> localRegInts[instr.registerB]
+                    instr.registerB == matchReg -> localRegInts[instr.registerA]
+                    else -> null
+                }
+                if (constValue != null && i + 1 < n) {
+                    dispatchTargets.getOrPut(i + 1) { mutableSetOf() }.add(constValue)
+                }
+            }
+        }
+
+        if (dispatchTargets.isEmpty()) return null
+
+        // Build predecessor edges from CFG successors
+        val preds = Array(n) { mutableListOf<Int>() }
+        for (j in 0 until n) {
+            for (s in cfg.successors[j]) {
+                preds[s].add(j)
+            }
+        }
+        val predecessors: Array<List<Int>> = Array(n) { preds[it] as List<Int> }
+
+        DexDebugLog.log("[UriParam] Detected UriMatcher dispatch: matchReg=v$matchReg, " +
+            "${dispatchTargets.size} dispatch targets, " +
+            "codes=${dispatchTargets.values.flatten().toSortedSet()}")
+
+        return MatchDispatchInfo(predecessors, dispatchTargets)
+    }
+
+    /**
+     * Backward BFS from an instruction to find which match code dispatch
+     * targets can reach it. Returns the set of match codes.
+     */
+    private fun findMatchCodesForInstruction(
+        instrIndex: Int,
+        info: MatchDispatchInfo
+    ): Set<Int> {
+        val visited = BooleanArray(info.predecessors.size)
+        val queue = ArrayDeque<Int>()
+        queue.add(instrIndex)
+        visited[instrIndex] = true
+
+        val matchCodes = mutableSetOf<Int>()
+
+        while (queue.isNotEmpty()) {
+            val idx = queue.removeFirst()
+            info.dispatchTargets[idx]?.let { matchCodes.addAll(it) }
+            for (pred in info.predecessors[idx]) {
+                if (!visited[pred]) {
+                    visited[pred] = true
+                    queue.add(pred)
+                }
+            }
+        }
+
+        return matchCodes
     }
 
     // --- Result management ---
@@ -310,8 +999,24 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         classDef: DexBackedClassDef,
         methodName: String
     ) {
+        // Exact string dedup
         if (uri in seenUris) return
+
+        // Safe wildcard dedup: only when both URIs share the same non-null match code
+        // (proving they go to the same handler). E.g. alarm/#/view and alarm/*/view
+        // with matchCode=101 are provably the same endpoint.
+        if (matchCode != null) {
+            val normalized = normalizeWildcards(uri)
+            val existingCode = seenNormalizedByMatchCode[normalized]
+            if (existingCode == matchCode) return  // same handler, skip duplicate
+            seenNormalizedByMatchCode[normalized] = matchCode
+        }
+
         seenUris.add(uri)
+
+        DexDebugLog.logFiltered(classDef.type, null,
+            "[UriPattern] Found URI \"$uri\" matchCode=$matchCode " +
+            "class=${classDef.type} method=$methodName")
 
         results.add(
             ContentProviderInfo(
@@ -322,6 +1027,23 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 sourceClass = classDef.type,
                 sourceMethod = methodName
             )
+        )
+    }
+
+    /** Replace both # and * with a common placeholder for wildcard dedup comparison. */
+    private fun normalizeWildcards(uri: String): String {
+        return uri.split('/').joinToString("/") { segment ->
+            if (segment == "#" || segment == "*") "?" else segment
+        }
+    }
+
+    companion object {
+        /** Opcodes that definitely end execution in this path. Do NOT include goto —
+         *  compiler-generated hashCode switches interleave goto (success jump) with
+         *  the next equals() check in the linear stream. */
+        private val CONTROL_FLOW_STOPS = setOf(
+            Opcode.RETURN_VOID, Opcode.RETURN, Opcode.RETURN_OBJECT, Opcode.RETURN_WIDE,
+            Opcode.THROW
         )
     }
 

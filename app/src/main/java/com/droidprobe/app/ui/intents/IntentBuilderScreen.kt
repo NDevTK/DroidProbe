@@ -217,7 +217,7 @@ private fun TargetCard(
         else -> Icons.AutoMirrored.Filled.OpenInNew
     }
 
-    val hasExpandableContent = target.discoveredExtras.isNotEmpty() || target.discoveredDataUris.isNotEmpty() || target.discoveredQueryParams.isNotEmpty()
+    val hasExpandableContent = target.discoveredExtras.isNotEmpty() || target.discoveredDataUris.isNotEmpty() || target.queryParamsByUri.isNotEmpty()
 
     Card(
         modifier = Modifier
@@ -302,8 +302,9 @@ private fun TargetCard(
             if (target.discoveredDataUris.isNotEmpty()) {
                 summaryParts.add("${target.discoveredDataUris.size} data URIs")
             }
-            if (target.discoveredQueryParams.isNotEmpty()) {
-                summaryParts.add("${target.discoveredQueryParams.size} query params")
+            val totalQueryParams = target.queryParamsByUri.values.sumOf { it.size }
+            if (totalQueryParams > 0) {
+                summaryParts.add("$totalQueryParams query params")
             }
             if (summaryParts.isNotEmpty()) {
                 Text(
@@ -411,10 +412,14 @@ private fun TargetCard(
                         )
 
                         queryParams.forEachIndexed { index, param ->
+                            val label = when {
+                                param.defaultValue != null -> "${param.key} (default: ${param.defaultValue})"
+                                else -> "${param.key} *"
+                            }
                             SuggestableTextField(
                                 value = param.value,
                                 onValueChange = { onQueryParamChanged(index, param.copy(value = it)) },
-                                label = param.key,
+                                label = label,
                                 suggestedValues = param.suggestedValues
                             )
                         }
@@ -477,13 +482,19 @@ private fun SuggestableTextField(
     onValueChange: (String) -> Unit,
     label: String,
     suggestedValues: List<String>,
-    keyboardType: KeyboardType = KeyboardType.Text
+    keyboardType: KeyboardType = KeyboardType.Text,
+    placeholder: String? = null
 ) {
+    val placeholderContent: @Composable (() -> Unit)? = placeholder?.let {
+        { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)) }
+    }
+
     if (suggestedValues.isEmpty()) {
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
             label = { Text(label) },
+            placeholder = placeholderContent,
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = keyboardType)
@@ -502,6 +513,7 @@ private fun SuggestableTextField(
                     expanded = true
                 },
                 label = { Text(label) },
+                placeholder = placeholderContent,
                 modifier = Modifier
                     .fillMaxWidth()
                     .menuAnchor(MenuAnchorType.PrimaryEditable),

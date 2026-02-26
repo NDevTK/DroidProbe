@@ -26,8 +26,12 @@ data class LaunchableTarget(
     val dataSchemes: List<String>,
     val discoveredExtras: List<IntentInfo>,
     val discoveredDataUris: List<String> = emptyList(),
-    val discoveredQueryParams: List<String> = emptyList(),
-    val discoveredQueryParamValues: Map<String, List<String>> = emptyMap()
+    /** Per-URI query params: full URI string → list of param names */
+    val queryParamsByUri: Map<String, List<String>> = emptyMap(),
+    /** Per-URI query param values: full URI string → (param → values) */
+    val queryParamValuesByUri: Map<String, Map<String, List<String>>> = emptyMap(),
+    /** Per-URI query param defaults: full URI string → (param → default value) */
+    val queryParamDefaultsByUri: Map<String, Map<String, String>> = emptyMap()
 )
 
 data class ExtraEntry(
@@ -40,7 +44,8 @@ data class ExtraEntry(
 data class QueryParamEntry(
     val key: String = "",
     val value: String = "",
-    val suggestedValues: List<String> = emptyList()
+    val suggestedValues: List<String> = emptyList(),
+    val defaultValue: String? = null
 )
 
 data class IntentBuilderUiState(
@@ -123,25 +128,30 @@ class IntentBuilderViewModel(
                         // The sourceClass tells us which class the UriMatcher lives in.
                         val compSmali = "L${comp.name.replace('.', '/')};"
                         val compDataUris = mutableListOf<String>()
-                        val compQueryParams = mutableSetOf<String>()
-                        val compQueryParamValues = mutableMapOf<String, MutableSet<String>>()
+                        val perUriParams = mutableMapOf<String, List<String>>()
+                        val perUriParamValues = mutableMapOf<String, Map<String, List<String>>>()
+                        val perUriParamDefaults = mutableMapOf<String, Map<String, String>>()
                         for (pattern in deepLinkPatterns) {
                             if (pattern.sourceClass != compSmali) continue
+                            val fullUri: String
                             val uri = pattern.uriPattern
                             if (uri.contains("://")) {
-                                compDataUris.add(uri)
+                                fullUri = uri
                             } else {
                                 val authority = uri.substringBefore('/')
                                 val scheme = schemeByAuthority[authority]
-                                if (scheme != null) {
-                                    compDataUris.add("$scheme://$uri")
-                                } else {
-                                    compDataUris.add(uri)
-                                }
+                                fullUri = if (scheme != null) "$scheme://$uri" else uri
                             }
-                            compQueryParams.addAll(pattern.queryParameters)
-                            pattern.queryParameterValues.forEach { (param, values) ->
-                                compQueryParamValues.getOrPut(param) { mutableSetOf() }.addAll(values)
+                            compDataUris.add(fullUri)
+                            if (pattern.queryParameters.isNotEmpty()) {
+                                perUriParams[fullUri] = pattern.queryParameters.sorted()
+                            }
+                            if (pattern.queryParameterValues.isNotEmpty()) {
+                                perUriParamValues[fullUri] = pattern.queryParameterValues
+                                    .mapValues { (_, values) -> values.sorted() }
+                            }
+                            if (pattern.queryParameterDefaults.isNotEmpty()) {
+                                perUriParamDefaults[fullUri] = pattern.queryParameterDefaults
                             }
                         }
 
@@ -154,8 +164,9 @@ class IntentBuilderViewModel(
                                 dataSchemes = allSchemes,
                                 discoveredExtras = compExtras,
                                 discoveredDataUris = compDataUris.distinct(),
-                                discoveredQueryParams = compQueryParams.sorted(),
-                                discoveredQueryParamValues = compQueryParamValues.mapValues { it.value.toList().sorted() }
+                                queryParamsByUri = perUriParams,
+                                queryParamValuesByUri = perUriParamValues,
+                                queryParamDefaultsByUri = perUriParamDefaults
                             )
                         )
                     }
@@ -179,15 +190,8 @@ class IntentBuilderViewModel(
                 suggestedValues = info.possibleValues
             )
         }
-        val queryParams = target.discoveredQueryParams.map { key ->
-            QueryParamEntry(
-                key = key,
-                value = "",
-                suggestedValues = target.discoveredQueryParamValues[key] ?: emptyList()
-            )
-        }
         _uiState.update {
-            it.copy(expandedTarget = target, extras = extras, queryParams = queryParams, dataUri = "", result = null, error = null)
+            it.copy(expandedTarget = target, extras = extras, queryParams = emptyList(), dataUri = "", result = null, error = null)
         }
     }
 
@@ -204,7 +208,27 @@ class IntentBuilderViewModel(
     }
 
     fun updateDataUri(uri: String) {
-        _uiState.update { it.copy(dataUri = uri) }
+        val target = _uiState.value.expandedTarget
+        val queryParams = if (uri.isNotBlank() && target != null) {
+            val paramNames = target.queryParamsByUri[uri] ?: emptyList()
+            val paramValues = target.queryParamValuesByUri[uri] ?: emptyMap()
+            val paramDefaults = target.queryParamDefaultsByUri[uri] ?: emptyMap()
+            paramNames.map { key ->
+                val default = paramDefaults[key]
+                val isBoolean = default == "true" || default == "false"
+                val suggestions = (paramValues[key] ?: emptyList()) +
+                    if (isBoolean) listOf("true", "false") else emptyList()
+                QueryParamEntry(
+                    key = key,
+                    value = "",
+                    suggestedValues = suggestions.distinct(),
+                    defaultValue = default
+                )
+            }
+        } else {
+            emptyList()
+        }
+        _uiState.update { it.copy(dataUri = uri, queryParams = queryParams) }
     }
 
     fun updateQueryParam(index: Int, entry: QueryParamEntry) {
