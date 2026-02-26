@@ -266,9 +266,10 @@ private fun TargetCard(
 
             // Actions and categories
             if (target.actions.isNotEmpty()) {
-                Row(
+                FlowRow(
                     modifier = Modifier.padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     target.actions.forEach { action ->
                         Surface(
