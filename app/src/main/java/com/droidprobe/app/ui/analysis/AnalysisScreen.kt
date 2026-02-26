@@ -666,11 +666,19 @@ private fun UriCard(info: ContentProviderInfo) {
                 )
             }
             if (info.queryParameters.isNotEmpty()) {
-                Text(
-                    text = "Query params: ${info.queryParameters.joinToString(", ")}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary
-                )
+                info.queryParameters.forEach { param ->
+                    val values = info.queryParameterValues[param]
+                    val display = if (values != null && values.isNotEmpty()) {
+                        "$param = [${values.joinToString(", ")}]"
+                    } else {
+                        param
+                    }
+                    Text(
+                        text = "?$display",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
             }
             Text(
                 text = "Source: ${info.sourceClass.removePrefix("L").removeSuffix(";").replace('/', '.')}",
@@ -697,6 +705,13 @@ private fun IntentExtraCard(info: IntentInfo) {
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.secondary
                 )
+                if (info.possibleValues.isNotEmpty()) {
+                    Text(
+                        text = "Values: ${info.possibleValues.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
                 Text(
                     text = "Source: ${info.sourceClass.removePrefix("L").removeSuffix(";").replace('/', '.')}",
                     style = MaterialTheme.typography.bodySmall,

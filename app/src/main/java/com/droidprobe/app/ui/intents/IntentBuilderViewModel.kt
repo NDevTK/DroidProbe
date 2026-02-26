@@ -26,18 +26,21 @@ data class LaunchableTarget(
     val dataSchemes: List<String>,
     val discoveredExtras: List<IntentInfo>,
     val discoveredDataUris: List<String> = emptyList(),
-    val discoveredQueryParams: List<String> = emptyList()
+    val discoveredQueryParams: List<String> = emptyList(),
+    val discoveredQueryParamValues: Map<String, List<String>> = emptyMap()
 )
 
 data class ExtraEntry(
     val key: String = "",
     val value: String = "",
-    val type: String = "String"
+    val type: String = "String",
+    val suggestedValues: List<String> = emptyList()
 )
 
 data class QueryParamEntry(
     val key: String = "",
-    val value: String = ""
+    val value: String = "",
+    val suggestedValues: List<String> = emptyList()
 )
 
 data class IntentBuilderUiState(
@@ -121,6 +124,7 @@ class IntentBuilderViewModel(
                         val compSmali = "L${comp.name.replace('.', '/')};"
                         val compDataUris = mutableListOf<String>()
                         val compQueryParams = mutableSetOf<String>()
+                        val compQueryParamValues = mutableMapOf<String, MutableSet<String>>()
                         for (pattern in deepLinkPatterns) {
                             if (pattern.sourceClass != compSmali) continue
                             val uri = pattern.uriPattern
@@ -136,6 +140,9 @@ class IntentBuilderViewModel(
                                 }
                             }
                             compQueryParams.addAll(pattern.queryParameters)
+                            pattern.queryParameterValues.forEach { (param, values) ->
+                                compQueryParamValues.getOrPut(param) { mutableSetOf() }.addAll(values)
+                            }
                         }
 
                         targets.add(
@@ -147,7 +154,8 @@ class IntentBuilderViewModel(
                                 dataSchemes = allSchemes,
                                 discoveredExtras = compExtras,
                                 discoveredDataUris = compDataUris.distinct(),
-                                discoveredQueryParams = compQueryParams.sorted()
+                                discoveredQueryParams = compQueryParams.sorted(),
+                                discoveredQueryParamValues = compQueryParamValues.mapValues { it.value.toList().sorted() }
                             )
                         )
                     }
@@ -164,10 +172,19 @@ class IntentBuilderViewModel(
 
     fun expandTarget(target: LaunchableTarget) {
         val extras = target.discoveredExtras.map { info ->
-            ExtraEntry(key = info.extraKey, value = "", type = info.extraType ?: "String")
+            ExtraEntry(
+                key = info.extraKey,
+                value = "",
+                type = info.extraType ?: "String",
+                suggestedValues = info.possibleValues
+            )
         }
         val queryParams = target.discoveredQueryParams.map { key ->
-            QueryParamEntry(key = key, value = "")
+            QueryParamEntry(
+                key = key,
+                value = "",
+                suggestedValues = target.discoveredQueryParamValues[key] ?: emptyList()
+            )
         }
         _uiState.update {
             it.copy(expandedTarget = target, extras = extras, queryParams = queryParams, dataUri = "", result = null, error = null)

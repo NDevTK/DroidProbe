@@ -4,6 +4,7 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedMethod
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
+import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
@@ -12,28 +13,32 @@ import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.droidprobe.app.data.model.IntentInfo
 
 /**
- * Extracts intent extra keys and types from DEX bytecode by scanning for:
- * - Intent.putExtra(key, value) — all overloads
- * - Intent.getXxxExtra(key) — getStringExtra, getIntExtra, etc.
- * - Bundle.putXxx(key, value) and Bundle.getXxx(key)
- * - Intent.setAction(action) and Intent(action) constructor
+ * Extracts intent extra keys, types, and possible values from DEX bytecode.
+ *
+ * Detection patterns:
+ * - Intent.putExtra(key, value) — extracts both key and literal value
+ * - Intent.getXxxExtra(key) — extracts key, then scans forward for:
+ *   - String.equals("value") / equalsIgnoreCase("value") comparisons
+ *   - TextUtils.equals(extraValue, "value") comparisons
+ *   - packed-switch / sparse-switch on int results
+ * - Bundle.putXxx(key, value) and Bundle.getXxx(key) — same patterns
+ * - Intent.setAction(action)
  *
  * Uses the class hierarchy to resolve which exported component each extra
  * actually belongs to — traces inheritance, not name guessing.
  */
 class IntentExtraExtractor(
-    private val classHierarchy: Map<String, String>,  // class -> superclass (smali types)
-    private val componentClasses: Set<String>          // known exported components (smali types)
+    private val classHierarchy: Map<String, String>,
+    private val componentClasses: Set<String>
 ) {
 
     private val results = mutableListOf<IntentInfo>()
-    private val seenKeys = mutableSetOf<String>()
+    // Maps dedup key -> index in results list, for merging values
+    private val resultIndex = mutableMapOf<String, Int>()
     private val discoveredActions = mutableSetOf<String>()
 
-    // Cache: smali class type -> resolved component smali type (or null)
     private val componentResolutionCache = mutableMapOf<String, String?>()
 
-    // Maps method name → extra type for get*Extra methods
     private val getExtraTypeMap = mapOf(
         "getStringExtra" to "String",
         "getIntExtra" to "Int",
@@ -55,7 +60,16 @@ class IntentExtraExtractor(
         "getBundleExtra" to "Bundle"
     )
 
-    // Maps putExtra method signatures to extra type
+    // String return types that support equals comparison scanning
+    private val stringResultTypes = setOf(
+        "getStringExtra", "getSerializableExtra"
+    )
+
+    // Int return types that support switch scanning
+    private val intResultTypes = setOf(
+        "getIntExtra", "getShortExtra", "getByteExtra"
+    )
+
     private val putExtraTypeMap = mapOf(
         "(Ljava/lang/String;Ljava/lang/String;)" to "String",
         "(Ljava/lang/String;I)" to "Int",
@@ -83,30 +97,14 @@ class IntentExtraExtractor(
 
     fun getResults(): List<IntentInfo> = results.toList()
 
-    /**
-     * Resolve which exported component a class belongs to by walking up
-     * the inheritance chain. Also handles inner/anonymous classes by
-     * checking the outer class.
-     *
-     * Lcom/example/LoginActivity; → itself (if it's a component)
-     * Lcom/example/LoginActivity$1; → Lcom/example/LoginActivity;
-     * Lcom/example/BaseActivity; → any subclass that's a component? No — we
-     *   reverse-map: for each class, walk UP to find if it IS or extends a component.
-     *
-     * Actually we need the reverse: if extras are in BaseActivity, they belong
-     * to ALL components that extend BaseActivity. We handle this by building
-     * a subclass map and checking descendants.
-     */
     fun resolveComponent(smaliType: String): String? {
         componentResolutionCache[smaliType]?.let { return it }
 
-        // 1. Direct: this class IS a component
         if (smaliType in componentClasses) {
             componentResolutionCache[smaliType] = smaliType
             return smaliType
         }
 
-        // 2. Inner/anonymous class: Lcom/example/Foo$Bar; → check Lcom/example/Foo;
         val dollarIdx = smaliType.indexOf('$')
         if (dollarIdx > 0) {
             val outer = smaliType.substring(0, dollarIdx) + ";"
@@ -117,7 +115,6 @@ class IntentExtraExtractor(
             }
         }
 
-        // 3. Walk UP the inheritance chain — if this class extends a component
         var current: String? = smaliType
         val visited = mutableSetOf<String>()
         while (current != null && current !in visited) {
@@ -133,12 +130,7 @@ class IntentExtraExtractor(
         return null
     }
 
-    /**
-     * For classes that are superclasses of components (e.g. BaseActivity),
-     * find ALL component descendants. Called after all classes are processed.
-     */
     fun resolveSuperclassExtras(): List<IntentInfo> {
-        // Build reverse map: superclass -> list of component subclasses
         val subclassMap = mutableMapOf<String, MutableSet<String>>()
         for (compClass in componentClasses) {
             var current: String? = classHierarchy[compClass]
@@ -150,8 +142,6 @@ class IntentExtraExtractor(
             }
         }
 
-        // For any result where associatedComponent is null but sourceClass
-        // is an ancestor of components, duplicate for each descendant component
         val additional = mutableListOf<IntentInfo>()
         val toRemove = mutableListOf<IntentInfo>()
 
@@ -184,26 +174,11 @@ class IntentExtraExtractor(
             if (ref !is MethodReference) continue
 
             when {
-                // Intent.get*Extra(key)
-                isIntentGetExtra(ref) -> {
-                    handleGetExtra(ref, instructions, i, classDef, method)
-                }
-                // Intent.putExtra(key, value)
-                isIntentPutExtra(ref) -> {
-                    handlePutExtra(ref, instructions, i, classDef, method)
-                }
-                // Bundle.get*(key)
-                isBundleGet(ref) -> {
-                    handleBundleGet(ref, instructions, i, classDef, method)
-                }
-                // Bundle.put*(key, value)
-                isBundlePut(ref) -> {
-                    handleBundlePut(ref, instructions, i, classDef, method)
-                }
-                // Intent.setAction(action)
-                isSetAction(ref) -> {
-                    handleSetAction(instructions, i, classDef, method)
-                }
+                isIntentGetExtra(ref) -> handleGetExtra(ref, instructions, i, classDef, method)
+                isIntentPutExtra(ref) -> handlePutExtra(ref, instructions, i, classDef, method)
+                isBundleGet(ref) -> handleBundleGet(ref, instructions, i, classDef, method)
+                isBundlePut(ref) -> handleBundlePut(ref, instructions, i, classDef, method)
+                isSetAction(ref) -> handleSetAction(instructions, i)
             }
         }
     }
@@ -250,13 +225,21 @@ class IntentExtraExtractor(
     ) {
         val type = getExtraTypeMap[ref.name] ?: "Unknown"
         val instr = instructions[callIndex] as? Instruction35c ?: return
-        // For instance methods: registerC = this (Intent), registerD = key string
         val keyReg = instr.registerD
-        val key = resolveStringFromRegister(instructions, callIndex, keyReg)
+        val key = resolveStringFromRegister(instructions, callIndex, keyReg) ?: return
 
-        if (key != null) {
-            addResult(key, type, classDef, method)
+        // Scan forward for value comparisons on the result register
+        val values = mutableListOf<String>()
+        val resultReg = getMoveResultRegister(instructions, callIndex)
+        if (resultReg != null) {
+            if (ref.name in stringResultTypes) {
+                values.addAll(scanForwardForStringValues(instructions, callIndex + 2, resultReg))
+            } else if (ref.name in intResultTypes) {
+                values.addAll(scanForwardForIntValues(instructions, callIndex + 2, resultReg))
+            }
         }
+
+        addResult(key, type, classDef, method, values)
     }
 
     private fun handlePutExtra(
@@ -266,20 +249,26 @@ class IntentExtraExtractor(
         classDef: DexBackedClassDef,
         method: DexBackedMethod
     ) {
-        // Determine type from method signature
         val paramSig = ref.parameterTypes.joinToString(",", "(", ")")
         val type = putExtraTypeMap.entries.find { (sig, _) ->
             paramSig.contains(sig.substringAfter("(").substringBefore(")"))
         }?.value ?: "Unknown"
 
         val instr = instructions[callIndex] as? Instruction35c ?: return
-        // registerC = this (Intent), registerD = key
         val keyReg = instr.registerD
-        val key = resolveStringFromRegister(instructions, callIndex, keyReg)
+        val key = resolveStringFromRegister(instructions, callIndex, keyReg) ?: return
 
-        if (key != null) {
-            addResult(key, type, classDef, method)
+        // Pattern A: resolve the value register (registerE) for string/int literals
+        val value = when (type) {
+            "String" -> resolveStringFromRegister(instructions, callIndex, instr.registerE)
+            "Int", "Short", "Byte" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            "Boolean" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
+                if (it == 0) "false" else "true"
+            }
+            else -> null
         }
+
+        addResult(key, type, classDef, method, if (value != null) listOf(value) else emptyList())
     }
 
     private fun handleBundleGet(
@@ -291,12 +280,19 @@ class IntentExtraExtractor(
     ) {
         val type = inferTypeFromBundleMethodName(ref.name, "get")
         val instr = instructions[callIndex] as? Instruction35c ?: return
-        val keyReg = instr.registerD
-        val key = resolveStringFromRegister(instructions, callIndex, keyReg)
+        val key = resolveStringFromRegister(instructions, callIndex, instr.registerD) ?: return
 
-        if (key != null) {
-            addResult(key, type, classDef, method)
+        val values = mutableListOf<String>()
+        val resultReg = getMoveResultRegister(instructions, callIndex)
+        if (resultReg != null) {
+            if (type == "String") {
+                values.addAll(scanForwardForStringValues(instructions, callIndex + 2, resultReg))
+            } else if (type in listOf("Int", "Short", "Byte")) {
+                values.addAll(scanForwardForIntValues(instructions, callIndex + 2, resultReg))
+            }
         }
+
+        addResult(key, type, classDef, method, values)
     }
 
     private fun handleBundlePut(
@@ -308,29 +304,166 @@ class IntentExtraExtractor(
     ) {
         val type = inferTypeFromBundleMethodName(ref.name, "put")
         val instr = instructions[callIndex] as? Instruction35c ?: return
-        val keyReg = instr.registerD
-        val key = resolveStringFromRegister(instructions, callIndex, keyReg)
+        val key = resolveStringFromRegister(instructions, callIndex, instr.registerD) ?: return
 
-        if (key != null) {
-            addResult(key, type, classDef, method)
+        val value = when (type) {
+            "String" -> resolveStringFromRegister(instructions, callIndex, instr.registerE)
+            "Int", "Short", "Byte" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            "Boolean" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
+                if (it == 0) "false" else "true"
+            }
+            else -> null
         }
+
+        addResult(key, type, classDef, method, if (value != null) listOf(value) else emptyList())
     }
 
-    private fun handleSetAction(
-        instructions: List<Instruction>,
-        callIndex: Int,
-        classDef: DexBackedClassDef,
-        method: DexBackedMethod
-    ) {
+    private fun handleSetAction(instructions: List<Instruction>, callIndex: Int) {
         val instr = instructions[callIndex] as? Instruction35c ?: return
-        val actionReg = instr.registerD
-        val action = resolveStringFromRegister(instructions, callIndex, actionReg)
+        val action = resolveStringFromRegister(instructions, callIndex, instr.registerD)
         if (action != null) {
             discoveredActions.add(action)
         }
     }
 
+    // --- Forward scanning for values ---
+
+    /**
+     * After a getStringExtra/getSerializableExtra call, scan forward for:
+     * - String.equals(resultReg, constString) / String.equalsIgnoreCase(...)
+     * - TextUtils.equals(resultReg, constString) or (constString, resultReg)
+     */
+    private fun scanForwardForStringValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        resultReg: Int
+    ): List<String> {
+        val values = mutableSetOf<String>()
+        val limit = minOf(instructions.size, startIndex + 40)
+
+        for (i in startIndex until limit) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+            if (instr !is Instruction35c) continue
+
+            when {
+                // String.equals(Object) or String.equalsIgnoreCase(String)
+                ref.definingClass == "Ljava/lang/String;" &&
+                        (ref.name == "equals" || ref.name == "equalsIgnoreCase") -> {
+                    if (instr.registerC == resultReg) {
+                        // resultReg.equals(vD) — resolve vD
+                        resolveStringFromRegister(instructions, i, instr.registerD)?.let {
+                            values.add(it)
+                        }
+                    } else if (instr.registerD == resultReg) {
+                        // someConst.equals(resultReg) — resolve someConst (registerC)
+                        resolveStringFromRegister(instructions, i, instr.registerC)?.let {
+                            values.add(it)
+                        }
+                    }
+                }
+                // TextUtils.equals(CharSequence, CharSequence)
+                ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals" -> {
+                    if (instr.registerC == resultReg) {
+                        resolveStringFromRegister(instructions, i, instr.registerD)?.let {
+                            values.add(it)
+                        }
+                    } else if (instr.registerD == resultReg) {
+                        resolveStringFromRegister(instructions, i, instr.registerC)?.let {
+                            values.add(it)
+                        }
+                    }
+                }
+            }
+        }
+        return values.toList()
+    }
+
+    /**
+     * After a getIntExtra call, scan forward for packed-switch or sparse-switch
+     * on the result register.
+     */
+    private fun scanForwardForIntValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        resultReg: Int
+    ): List<String> {
+        val values = mutableSetOf<String>()
+        val limit = minOf(instructions.size, startIndex + 20)
+
+        for (i in startIndex until limit) {
+            val instr = instructions[i]
+
+            // packed-switch or sparse-switch on the result register
+            if (instr.opcode == Opcode.PACKED_SWITCH || instr.opcode == Opcode.SPARSE_SWITCH) {
+                if (instr is OneRegisterInstruction && instr.registerA == resultReg) {
+                    // Find the switch payload
+                    val payload = findSwitchPayload(instructions, i)
+                    if (payload != null) {
+                        values.addAll(payload.map { it.toString() })
+                    }
+                    break
+                }
+            }
+
+            // Also catch if-eq / if-ne comparisons with constants
+            if (instr.opcode == Opcode.IF_EQ || instr.opcode == Opcode.IF_NE) {
+                // These are TwoRegisterInstruction with registerA and registerB
+                // One register is resultReg, the other holds a const
+                if (instr is com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction) {
+                    val otherReg = when {
+                        instr.registerA == resultReg -> instr.registerB
+                        instr.registerB == resultReg -> instr.registerA
+                        else -> continue
+                    }
+                    resolveIntFromRegister(instructions, i, otherReg)?.let {
+                        values.add(it.toString())
+                    }
+                }
+            }
+        }
+        return values.toList()
+    }
+
+    /**
+     * Find switch payload values for a packed-switch or sparse-switch instruction.
+     */
+    private fun findSwitchPayload(instructions: List<Instruction>, switchIndex: Int): List<Int>? {
+        // The switch instruction references a payload at an offset
+        // In dexlib2, we need to scan for the payload instruction
+        for (j in switchIndex + 1 until instructions.size) {
+            val payload = instructions[j]
+            when (payload) {
+                is com.android.tools.smali.dexlib2.iface.instruction.formats.PackedSwitchPayload -> {
+                    val elements = payload.switchElements
+                    return elements.map { it.key }
+                }
+                is com.android.tools.smali.dexlib2.iface.instruction.formats.SparseSwitchPayload -> {
+                    val elements = payload.switchElements
+                    return elements.map { it.key }
+                }
+            }
+        }
+        return null
+    }
+
     // --- Helpers ---
+
+    /**
+     * Get the register where move-result / move-result-object stores the return value.
+     */
+    private fun getMoveResultRegister(instructions: List<Instruction>, callIndex: Int): Int? {
+        if (callIndex + 1 >= instructions.size) return null
+        val next = instructions[callIndex + 1]
+        if (next.opcode == Opcode.MOVE_RESULT || next.opcode == Opcode.MOVE_RESULT_OBJECT ||
+            next.opcode == Opcode.MOVE_RESULT_WIDE
+        ) {
+            return (next as? OneRegisterInstruction)?.registerA
+        }
+        return null
+    }
 
     private fun inferTypeFromBundleMethodName(methodName: String, prefix: String): String {
         val suffix = methodName.removePrefix(prefix)
@@ -366,26 +499,54 @@ class IntentExtraExtractor(
         return null
     }
 
+    private fun resolveIntFromRegister(
+        instructions: List<Instruction>,
+        callIndex: Int,
+        register: Int
+    ): Int? {
+        for (j in callIndex - 1 downTo maxOf(0, callIndex - 30)) {
+            val prev = instructions[j]
+            if (prev.opcode in listOf(Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16)) {
+                if (prev is OneRegisterInstruction && prev.registerA == register &&
+                    prev is NarrowLiteralInstruction
+                ) {
+                    return prev.narrowLiteral
+                }
+            }
+        }
+        return null
+    }
+
     private fun addResult(
         key: String,
         type: String,
         classDef: DexBackedClassDef,
-        method: DexBackedMethod
+        method: DexBackedMethod,
+        values: List<String> = emptyList()
     ) {
-        // Include source class in dedup key — same extra in different classes = separate entries
         val uniqueKey = "${classDef.type}:$key:$type"
-        if (uniqueKey in seenKeys) return
-        seenKeys.add(uniqueKey)
 
-        // Resolve which component this class belongs to via inheritance
+        // If we've already seen this extra, merge any new values into it
+        val existingIdx = resultIndex[uniqueKey]
+        if (existingIdx != null) {
+            if (values.isNotEmpty()) {
+                val existing = results[existingIdx]
+                val merged = (existing.possibleValues + values).distinct()
+                results[existingIdx] = existing.copy(possibleValues = merged)
+            }
+            return
+        }
+
         val resolvedComponent = resolveComponent(classDef.type)
         val componentJava = resolvedComponent
             ?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.')
 
+        resultIndex[uniqueKey] = results.size
         results.add(
             IntentInfo(
                 extraKey = key,
                 extraType = type,
+                possibleValues = values.distinct(),
                 associatedAction = null,
                 associatedComponent = componentJava,
                 sourceClass = classDef.type,

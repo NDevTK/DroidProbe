@@ -26,12 +26,16 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -41,6 +45,9 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -404,12 +411,11 @@ private fun TargetCard(
                         )
 
                         queryParams.forEachIndexed { index, param ->
-                            OutlinedTextField(
+                            SuggestableTextField(
                                 value = param.value,
                                 onValueChange = { onQueryParamChanged(index, param.copy(value = it)) },
-                                label = { Text(param.key) },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                label = param.key,
+                                suggestedValues = param.suggestedValues
                             )
                         }
                     }
@@ -424,7 +430,6 @@ private fun TargetCard(
 
                         extras.forEachIndexed { index, entry ->
                             Column {
-                                // Key label — full width so it never truncates
                                 Text(
                                     text = entry.key,
                                     style = MaterialTheme.typography.labelMedium,
@@ -432,20 +437,16 @@ private fun TargetCard(
                                     modifier = Modifier.fillMaxWidth()
                                 )
 
-                                // Value (editable with type-appropriate keyboard)
-                                OutlinedTextField(
+                                SuggestableTextField(
                                     value = entry.value,
                                     onValueChange = { onExtraChanged(index, entry.copy(value = it)) },
-                                    label = { Text(entry.type) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(
-                                        keyboardType = when (entry.type) {
-                                            "Int", "Long", "Short", "Byte" -> KeyboardType.Number
-                                            "Float", "Double" -> KeyboardType.Decimal
-                                            else -> KeyboardType.Text
-                                        }
-                                    )
+                                    label = entry.type,
+                                    suggestedValues = entry.suggestedValues,
+                                    keyboardType = when (entry.type) {
+                                        "Int", "Long", "Short", "Byte" -> KeyboardType.Number
+                                        "Float", "Double" -> KeyboardType.Decimal
+                                        else -> KeyboardType.Text
+                                    }
                                 )
                             }
                         }
@@ -458,6 +459,74 @@ private fun TargetCard(
                         Icon(Icons.AutoMirrored.Filled.Send, null)
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Text field that shows a dropdown of suggested values when available,
+ * while still allowing freeform text input.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SuggestableTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    suggestedValues: List<String>,
+    keyboardType: KeyboardType = KeyboardType.Text
+) {
+    if (suggestedValues.isEmpty()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text(label) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType)
+        )
+    } else {
+        var expanded by remember { mutableStateOf(false) }
+
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it }
+        ) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = {
+                    onValueChange(it)
+                    expanded = true
+                },
+                label = { Text(label) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(MenuAnchorType.PrimaryEditable),
+                singleLine = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                keyboardOptions = KeyboardOptions(keyboardType = keyboardType)
+            )
+
+            // Filter suggestions based on current text
+            val filtered = if (value.isBlank()) suggestedValues
+            else suggestedValues.filter { it.contains(value, ignoreCase = true) }
+
+            if (filtered.isNotEmpty()) {
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
+                    filtered.forEach { suggestion ->
+                        DropdownMenuItem(
+                            text = { Text(suggestion) },
+                            onClick = {
+                                onValueChange(suggestion)
+                                expanded = false
+                            }
+                        )
                     }
                 }
             }

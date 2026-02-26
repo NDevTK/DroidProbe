@@ -31,6 +31,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     private val seenUris = mutableSetOf<String>()
     private val knownAuthorities = manifestAnalysis.providers.mapNotNull { it.authority }.toSet()
     private val queryParamsByClass = mutableMapOf<String, MutableSet<String>>()
+    private val queryParamValuesByClass = mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
 
     fun process(classDef: DexBackedClassDef) {
         checkStaticFields(classDef)
@@ -44,8 +45,14 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     fun getResults(): List<ContentProviderInfo> {
         return results.map { info ->
             val params = queryParamsByClass[info.sourceClass]
+            val paramValues = queryParamValuesByClass[info.sourceClass]
             if (params != null && params.isNotEmpty()) {
-                info.copy(queryParameters = params.toList().sorted())
+                info.copy(
+                    queryParameters = params.toList().sorted(),
+                    queryParameterValues = paramValues
+                        ?.mapValues { (_, values) -> values.toList().sorted() }
+                        ?: emptyMap()
+                )
             } else {
                 info
             }
@@ -97,7 +104,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         val regStrings = mutableMapOf<Int, String>()
         val regInts = mutableMapOf<Int, Int>()
 
-        for (instr in instructions) {
+        for ((i, instr) in instructions.withIndex()) {
             trackStringRegisters(instr, regStrings)
             trackIntRegisters(instr, regInts)
 
@@ -109,7 +116,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 isUriMatcherAddUri(ref) -> handleAddUri(regStrings, regInts, instr, classDef, method)
                 isUriParse(ref) -> handleUriParse(regStrings, instr, classDef, method)
                 isContentUrisWithAppendedId(ref) -> handleContentUris(regStrings, instr, classDef, method)
-                isGetQueryParameter(ref) -> handleGetQueryParameter(regStrings, instr, classDef)
+                isGetQueryParameter(ref) -> handleGetQueryParameter(regStrings, instr, instructions, i, classDef)
             }
         }
     }
@@ -226,13 +233,73 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     private fun handleGetQueryParameter(
         regStrings: Map<Int, String>,
         instr: Instruction,
+        instructions: List<Instruction>,
+        callIndex: Int,
         classDef: DexBackedClassDef
     ) {
         if (instr !is Instruction35c) return
-        // getQueryParameter(name: String) — name is in registerD (first arg after this)
         val paramName = regStrings[instr.registerD] ?: return
         if (paramName.isBlank()) return
         queryParamsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(paramName)
+
+        // Scan forward for String.equals / TextUtils.equals on the result
+        val resultReg = getMoveResultRegister(instructions, callIndex) ?: return
+        val values = scanForwardForStringValues(instructions, callIndex + 2, resultReg, regStrings)
+        if (values.isNotEmpty()) {
+            queryParamValuesByClass
+                .getOrPut(classDef.type) { mutableMapOf() }
+                .getOrPut(paramName) { mutableSetOf() }
+                .addAll(values)
+        }
+    }
+
+    private fun getMoveResultRegister(instructions: List<Instruction>, callIndex: Int): Int? {
+        if (callIndex + 1 >= instructions.size) return null
+        val next = instructions[callIndex + 1]
+        if (next.opcode == Opcode.MOVE_RESULT || next.opcode == Opcode.MOVE_RESULT_OBJECT) {
+            return (next as? OneRegisterInstruction)?.registerA
+        }
+        return null
+    }
+
+    /**
+     * Scan forward from a getQueryParameter result for String.equals / TextUtils.equals
+     * comparisons, extracting the compared string constants.
+     */
+    private fun scanForwardForStringValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        resultReg: Int,
+        regStrings: Map<Int, String>
+    ): List<String> {
+        val values = mutableSetOf<String>()
+        val limit = minOf(instructions.size, startIndex + 40)
+
+        for (i in startIndex until limit) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+
+            when {
+                ref.definingClass == "Ljava/lang/String;" &&
+                        (ref.name == "equals" || ref.name == "equalsIgnoreCase") -> {
+                    if (instr.registerC == resultReg) {
+                        regStrings[instr.registerD]?.let { values.add(it) }
+                    } else if (instr.registerD == resultReg) {
+                        regStrings[instr.registerC]?.let { values.add(it) }
+                    }
+                }
+                ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals" -> {
+                    if (instr.registerC == resultReg) {
+                        regStrings[instr.registerD]?.let { values.add(it) }
+                    } else if (instr.registerD == resultReg) {
+                        regStrings[instr.registerC]?.let { values.add(it) }
+                    }
+                }
+            }
+        }
+        return values.toList()
     }
 
     // --- Result management ---
