@@ -3,6 +3,10 @@ package com.droidprobe.app.analysis.dex
 import com.android.tools.smali.dexlib2.Opcodes
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.DexAnalysis
 import com.droidprobe.app.data.model.ManifestAnalysis
 import kotlinx.coroutines.Dispatchers
@@ -106,7 +110,86 @@ class DexAnalyzer {
         // Resolve extras in superclasses to their component descendants
         val resolvedExtras = intentExtractor.resolveSuperclassExtras()
 
-        val uriResults = uriExtractor.getResults()
+        val uriResults = uriExtractor.getResults().toMutableList()
+
+        // --- Post-process: Propagate orphaned query params from helper classes ---
+        // When an exported activity delegates getQueryParameter() to a helper class
+        // (composition pattern), the params are orphaned. Link them by scanning
+        // the activity's bytecode for referenced helper classes.
+        val orphanedParams = uriExtractor.getOrphanedParamsByClass()
+        if (orphanedParams.isNotEmpty()) {
+            val existingSourceClasses = uriResults.map { it.sourceClass }.toSet()
+            for (comp in manifestAnalysis.activities) {
+                if (!comp.isExported) continue
+
+                val compSmali = "L${comp.name.replace('.', '/')};"
+
+                // For activity-aliases, resolve to the target activity's class
+                val scanSmali = if (comp.targetActivity != null) {
+                    "L${comp.targetActivity.replace('.', '/')};"
+                } else {
+                    compSmali
+                }
+
+                // Skip if this component already has URI results with params
+                val alreadyHasParams = uriResults.any {
+                    (it.sourceClass == compSmali || it.sourceClass == scanSmali) &&
+                        it.queryParameters.isNotEmpty()
+                }
+                if (alreadyHasParams) continue
+
+                // Collect all non-framework classes referenced by this activity
+                val referencedClasses = collectClassReferences(
+                    scanSmali, classHierarchy, classIndex
+                )
+
+                // Collect orphaned params from referenced helper classes
+                val params = mutableSetOf<String>()
+                val paramValues = mutableMapOf<String, MutableSet<String>>()
+                val paramDefaults = mutableMapOf<String, String>()
+                for (refClass in referencedClasses) {
+                    val orphaned = orphanedParams[refClass] ?: continue
+                    params.addAll(orphaned.params)
+                    orphaned.values.forEach { (k, v) ->
+                        paramValues.getOrPut(k) { mutableSetOf() }.addAll(v)
+                    }
+                    paramDefaults.putAll(orphaned.defaults)
+                }
+                if (params.isEmpty()) continue
+
+                DexDebugLog.log("[DexAnalyzer] Cross-class param propagation: " +
+                    "${comp.name} ← ${params.size} params from helper classes")
+
+                // Build URIs from intent filter data (any filter with scheme+host)
+                for (filter in comp.intentFilters) {
+                    for (scheme in filter.dataSchemes) {
+                        for (host in filter.dataAuthorities) {
+                            val paths = filter.dataPaths.ifEmpty { listOf("") }
+                            for (path in paths) {
+                                val uri = if (path.isNotEmpty()) "$scheme://$host$path"
+                                    else "$scheme://$host"
+                                uriResults.add(
+                                    ContentProviderInfo(
+                                        authority = host,
+                                        uriPattern = uri,
+                                        matchCode = null,
+                                        associatedColumns = emptyList(),
+                                        queryParameters = params.sorted().toList(),
+                                        queryParameterValues = paramValues
+                                            .filter { it.value.isNotEmpty() }
+                                            .mapValues { (_, v) -> v.sorted().toList() },
+                                        queryParameterDefaults = paramDefaults,
+                                        sourceClass = compSmali,
+                                        sourceMethod = null
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         DexDebugLog.log("[DexAnalyzer] Analysis complete: " +
             "${uriResults.size} URIs, ${resolvedExtras.size} extras, " +
             "${fileProviderExtractor.getResults().size} fileProvider paths")
@@ -151,6 +234,77 @@ class DexAnalyzer {
         }
 
         return results
+    }
+
+    /**
+     * Collect non-framework classes referenced in a component's bytecode via BFS,
+     * walking the superclass chain at each level and following references up to
+     * [maxDepth] hops to catch helper-of-helper delegation chains
+     * (e.g. ViewerActivity → bzva → bzwe).
+     */
+    private fun collectClassReferences(
+        compSmali: String,
+        classHierarchy: Map<String, String>,
+        classIndex: Map<String, DexBackedClassDef>,
+        maxDepth: Int = 3
+    ): Set<String> {
+        val allRefs = mutableSetOf<String>()
+        val scanned = mutableSetOf<String>()
+
+        // Seed: the component class + its superclass chain
+        var frontier = mutableSetOf(compSmali)
+        var superclass = classHierarchy[compSmali]
+        while (superclass != null && !isFrameworkClass(superclass)) {
+            frontier.add(superclass)
+            superclass = classHierarchy[superclass]
+        }
+
+        for (depth in 0 until maxDepth) {
+            val nextFrontier = mutableSetOf<String>()
+            for (cls in frontier) {
+                if (cls in scanned) continue
+                scanned.add(cls)
+                val classDef = classIndex[cls] ?: continue
+
+                for (method in classDef.methods) {
+                    val impl = method.implementation ?: continue
+                    for (instr in impl.instructions) {
+                        if (instr !is ReferenceInstruction) continue
+                        when (val ref = instr.reference) {
+                            is MethodReference -> {
+                                val dc = ref.definingClass
+                                if (!isFrameworkClass(dc)) {
+                                    allRefs.add(dc)
+                                    if (dc !in scanned) nextFrontier.add(dc)
+                                }
+                                val ret = ref.returnType
+                                if (ret.startsWith("L") && !isFrameworkClass(ret)) {
+                                    allRefs.add(ret)
+                                    if (ret !in scanned) nextFrontier.add(ret)
+                                }
+                            }
+                            is FieldReference -> {
+                                val dc = ref.definingClass
+                                if (!isFrameworkClass(dc)) {
+                                    allRefs.add(dc)
+                                    if (dc !in scanned) nextFrontier.add(dc)
+                                }
+                                val ft = ref.type
+                                if (ft.startsWith("L") && !isFrameworkClass(ft)) {
+                                    allRefs.add(ft)
+                                    if (ft !in scanned) nextFrontier.add(ft)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (nextFrontier.isEmpty()) break
+            frontier = nextFrontier
+        }
+
+        allRefs.remove(compSmali)
+        return allRefs
     }
 
     private fun isFrameworkClass(type: String): Boolean {

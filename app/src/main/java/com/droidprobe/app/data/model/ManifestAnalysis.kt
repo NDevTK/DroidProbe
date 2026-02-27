@@ -13,7 +13,8 @@ data class ExportedComponent(
     val name: String,
     val isExported: Boolean,
     val permission: String?,
-    val intentFilters: List<IntentFilterInfo>
+    val intentFilters: List<IntentFilterInfo>,
+    val targetActivity: String? = null
 )
 
 data class IntentFilterInfo(

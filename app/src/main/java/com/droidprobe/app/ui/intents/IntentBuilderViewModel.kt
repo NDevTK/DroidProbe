@@ -120,13 +120,16 @@ class IntentBuilderViewModel(
                         val allSchemes = comp.intentFilters.flatMap { it.dataSchemes }
 
                         // Match extras by associatedComponent — resolved from inheritance chain
+                        // For activity-aliases, also match against the target activity
                         val compExtras = discoveredExtras
-                            .filter { it.associatedComponent == comp.name }
+                            .filter { it.associatedComponent == comp.name ||
+                                (comp.targetActivity != null && it.associatedComponent == comp.targetActivity) }
                             .distinctBy { it.extraKey }
 
                         // Match deep link URIs by sourceClass — same approach as extras.
                         // The sourceClass tells us which class the UriMatcher lives in.
                         val compSmali = "L${comp.name.replace('.', '/')};"
+                        val targetSmali = comp.targetActivity?.let { "L${it.replace('.', '/')};" }
                         // Build per-component scheme fallback from manifest intent filters
                         val compSchemeByAuthority = mutableMapOf<String, String>()
                         var compFallbackScheme: String? = null
@@ -142,21 +145,18 @@ class IntentBuilderViewModel(
                             }
                         }
 
-                        // Build candidate deep link URIs from browsable intent filters
+                        // Build candidate deep link URIs from intent filters with data
                         // for URI-based matching (e.g. "https://www.google.com/hsi")
-                        val isBrowsable = allCategories.contains("android.intent.category.BROWSABLE")
                         val filterDeepLinkUris = mutableSetOf<String>()
-                        if (isBrowsable) {
-                            for (filter in comp.intentFilters) {
-                                for (scheme in filter.dataSchemes) {
-                                    for (host in filter.dataAuthorities) {
-                                        if (filter.dataPaths.isNotEmpty()) {
-                                            for (path in filter.dataPaths) {
-                                                filterDeepLinkUris.add("$scheme://$host$path")
-                                            }
-                                        } else {
-                                            filterDeepLinkUris.add("$scheme://$host")
+                        for (filter in comp.intentFilters) {
+                            for (scheme in filter.dataSchemes) {
+                                for (host in filter.dataAuthorities) {
+                                    if (filter.dataPaths.isNotEmpty()) {
+                                        for (path in filter.dataPaths) {
+                                            filterDeepLinkUris.add("$scheme://$host$path")
                                         }
+                                    } else {
+                                        filterDeepLinkUris.add("$scheme://$host")
                                     }
                                 }
                             }
@@ -167,10 +167,11 @@ class IntentBuilderViewModel(
                         val perUriParamValues = mutableMapOf<String, Map<String, List<String>>>()
                         val perUriParamDefaults = mutableMapOf<String, Map<String, String>>()
                         for (pattern in deepLinkPatterns) {
-                            // Match by sourceClass (existing behavior)
-                            val matchesByClass = pattern.sourceClass == compSmali
-                            // Match by URI against browsable intent filter data
-                            val matchesByUri = isBrowsable && filterDeepLinkUris.any { filterUri ->
+                            // Match by sourceClass (including alias target)
+                            val matchesByClass = pattern.sourceClass == compSmali ||
+                                (targetSmali != null && pattern.sourceClass == targetSmali)
+                            // Match by URI against intent filter data
+                            val matchesByUri = filterDeepLinkUris.any { filterUri ->
                                 pattern.uriPattern == filterUri ||
                                     pattern.uriPattern.startsWith("$filterUri?") ||
                                     pattern.uriPattern.startsWith("$filterUri/")
@@ -202,10 +203,10 @@ class IntentBuilderViewModel(
                         }
 
                         // Producer URL scanning: extract query params from URL string
-                        // constants matching this component's browsable intent filters.
+                        // constants matching this component's intent filter data URIs.
                         // Catches params from producer code (e.g. classes that build deep
                         // link URLs) even when the consumer doesn't call getQueryParameter().
-                        if (isBrowsable && filterDeepLinkUris.isNotEmpty()) {
+                        if (filterDeepLinkUris.isNotEmpty()) {
                             val producerUrls = (dex?.allUrlStrings ?: emptyList()) +
                                 (dex?.deepLinkUriStrings ?: emptyList())
                             for (urlStr in producerUrls) {

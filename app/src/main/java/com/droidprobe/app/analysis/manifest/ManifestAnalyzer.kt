@@ -44,9 +44,9 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
         // Enrich with binary manifest XML for complete intent filters
         if (apkPath != null) {
             try {
-                val binaryFilters = BinaryManifestParser().parseFromApk(apkPath)
-                if (binaryFilters.isNotEmpty()) {
-                    return enrichWithBinaryFilters(base, binaryFilters)
+                val parseResult = BinaryManifestParser().parseFromApk(apkPath)
+                if (parseResult.filters.isNotEmpty() || parseResult.aliasTargets.isNotEmpty()) {
+                    return enrichWithBinaryFilters(base, parseResult)
                 }
             } catch (_: Exception) {
                 // Fall back to PM-only result
@@ -58,13 +58,22 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
 
     private fun enrichWithBinaryFilters(
         base: ManifestAnalysis,
-        binaryFilters: Map<String, List<BinaryManifestParser.RawIntentFilter>>
+        parseResult: BinaryManifestParser.ParseResult
     ): ManifestAnalysis {
+        val binaryFilters = parseResult.filters
+        val aliasTargets = parseResult.aliasTargets
+
         fun enrichComponents(components: List<ExportedComponent>): List<ExportedComponent> {
             return components.map { component ->
+                var enriched = component
+                // Set targetActivity from binary manifest for activity-aliases
+                val target = aliasTargets[component.name]
+                if (target != null && enriched.targetActivity == null) {
+                    enriched = enriched.copy(targetActivity = target)
+                }
                 val rawFilters = binaryFilters[component.name]
                 if (rawFilters != null && rawFilters.isNotEmpty()) {
-                    component.copy(intentFilters = rawFilters.map { raw ->
+                    enriched = enriched.copy(intentFilters = rawFilters.map { raw ->
                         IntentFilterInfo(
                             actions = raw.actions,
                             categories = raw.categories,
@@ -77,9 +86,8 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
                             mimeTypes = raw.dataMimeTypes
                         )
                     })
-                } else {
-                    component
                 }
+                enriched
             }
         }
 
@@ -101,7 +109,8 @@ class ManifestAnalyzer(private val packageManager: PackageManager) {
                     is ServiceInfo -> component.permission
                     else -> null
                 },
-                intentFilters = extractIntentFilters(component)
+                intentFilters = extractIntentFilters(component),
+                targetActivity = (component as? ActivityInfo)?.targetActivity
             )
         }
     }

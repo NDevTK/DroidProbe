@@ -20,20 +20,26 @@ class BinaryManifestParser {
         val dataMimeTypes: MutableList<String> = mutableListOf()
     )
 
-    fun parseFromApk(apkPath: String): Map<String, List<RawIntentFilter>> {
+    data class ParseResult(
+        val filters: Map<String, List<RawIntentFilter>>,
+        val aliasTargets: Map<String, String>  // alias name → target activity name
+    )
+
+    fun parseFromApk(apkPath: String): ParseResult {
         val bytes = ZipFile(File(apkPath)).use { zip ->
-            val entry = zip.getEntry("AndroidManifest.xml") ?: return emptyMap()
+            val entry = zip.getEntry("AndroidManifest.xml") ?: return ParseResult(emptyMap(), emptyMap())
             zip.getInputStream(entry).use { it.readBytes() }
         }
-        val events = AxmlParser().parse(bytes) ?: return emptyMap()
+        val events = AxmlParser().parse(bytes) ?: return ParseResult(emptyMap(), emptyMap())
         return buildFilters(events)
     }
 
     private fun buildFilters(
         events: List<AxmlParser.XmlEvent>
-    ): Map<String, List<RawIntentFilter>> {
+    ): ParseResult {
         var packageName = ""
         val result = mutableMapOf<String, MutableList<RawIntentFilter>>()
+        val aliasTargets = mutableMapOf<String, String>()
 
         var currentComponentName: String? = null
         var currentFilter: RawIntentFilter? = null
@@ -53,6 +59,13 @@ class BinaryManifestParser {
                             if (inApplication) {
                                 val rawName = event.attributes["name"] ?: ""
                                 currentComponentName = resolveComponentName(rawName, packageName)
+                                if (event.name == "activity-alias") {
+                                    val rawTarget = event.attributes["targetActivity"] ?: ""
+                                    if (rawTarget.isNotEmpty()) {
+                                        aliasTargets[currentComponentName!!] =
+                                            resolveComponentName(rawTarget, packageName)
+                                    }
+                                }
                             }
                         }
                         "intent-filter" -> {
@@ -102,7 +115,7 @@ class BinaryManifestParser {
             }
         }
 
-        return result
+        return ParseResult(result, aliasTargets)
     }
 
     private fun resolveComponentName(name: String, packageName: String): String {

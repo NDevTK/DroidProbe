@@ -615,6 +615,33 @@ class UriPatternExtractor(
         }
     }
 
+    data class OrphanedParamInfo(
+        val params: Set<String>,
+        val values: Map<String, Set<String>>,
+        val defaults: Map<String, String>
+    )
+
+    /**
+     * Return query params for classes that have getQueryParameter() detections
+     * but no corresponding URI result — "orphaned" params from helper classes.
+     * Must be called AFTER getResults().
+     */
+    fun getOrphanedParamsByClass(): Map<String, OrphanedParamInfo> {
+        val usedClasses = results.map { it.sourceClass }.toSet() +
+            classesForMatchCode.values.flatten().toSet()
+
+        return queryParamsByClass
+            .filter { (cls, _) -> cls !in usedClasses }
+            .mapValues { (cls, params) ->
+                OrphanedParamInfo(
+                    params = params.toSet(),
+                    values = queryParamValuesByClass[cls]
+                        ?.mapValues { (_, v) -> v.toSet() } ?: emptyMap(),
+                    defaults = queryParamDefaultsByClass[cls] ?: emptyMap()
+                )
+            }
+    }
+
     private fun checkStaticFields(classDef: DexBackedClassDef) {
         for (field in classDef.staticFields) {
             if ((field.name.endsWith("URI") || field.name.endsWith("_URI") || field.name == "CONTENT_URI") &&
