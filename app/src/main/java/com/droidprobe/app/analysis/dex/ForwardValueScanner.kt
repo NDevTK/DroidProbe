@@ -159,6 +159,15 @@ object ForwardValueScanner {
                 continue
             }
 
+            // String.hashCode() — compiled string switch: hashCode → switch → equals branches
+            if (ref.definingClass == "Ljava/lang/String;" && ref.name == "hashCode" &&
+                ref.parameterTypes.isEmpty() && instr.registerC == trackedReg
+            ) {
+                values.addAll(scanStringSwitchValues(instructions, i + 1, trackedReg, cfgStrings))
+                skipNextMoveResult = true
+                break
+            }
+
             // String.equals / equalsIgnoreCase
             if (ref.definingClass == "Ljava/lang/String;" &&
                 (ref.name == "equals" || ref.name == "equalsIgnoreCase")
@@ -357,7 +366,123 @@ object ForwardValueScanner {
         return emptyList()
     }
 
+    /**
+     * Follow a string register into a called method and scan for string comparisons there.
+     * Mirrors [resolveEnumValues] but for String parameters — detects equals() comparisons
+     * and string switch (hashCode + equals) patterns in the target method.
+     */
+    fun resolveStringEnumValues(
+        classIndex: Map<String, DexBackedClassDef>,
+        instructions: List<Instruction>,
+        startIndex: Int,
+        stringReg: Int,
+        cfgStrings: Array<Map<Int, String>?>,
+        window: Int = 10
+    ): List<String> {
+        val limit = minOf(instructions.size, startIndex + window)
+        for (i in startIndex until limit) {
+            val instr = instructions[i]
+
+            if (instr.opcode in CONTROL_FLOW_STOPS) break
+
+            if (instr !is ReferenceInstruction) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+
+            if (isFrameworkClass(ref.definingClass)) continue
+
+            // Find which argument position stringReg occupies
+            val argIndex = when (instr) {
+                is Instruction35c -> {
+                    when {
+                        instr.registerCount >= 1 && instr.registerC == stringReg -> 0
+                        instr.registerCount >= 2 && instr.registerD == stringReg -> 1
+                        instr.registerCount >= 3 && instr.registerE == stringReg -> 2
+                        instr.registerCount >= 4 && instr.registerF == stringReg -> 3
+                        instr.registerCount >= 5 && instr.registerG == stringReg -> 4
+                        else -> continue
+                    }
+                }
+                is Instruction3rc -> {
+                    val offset = stringReg - instr.startRegister
+                    if (offset in 0 until instr.registerCount) offset else continue
+                }
+                else -> continue
+            }
+
+            val isStatic = instr.opcode == Opcode.INVOKE_STATIC ||
+                    instr.opcode == Opcode.INVOKE_STATIC_RANGE
+            val paramIndex = if (isStatic) argIndex else argIndex - 1
+            if (paramIndex < 0) continue
+
+            if (paramIndex >= ref.parameterTypes.size) continue
+            val paramType = ref.parameterTypes[paramIndex].toString()
+            if (paramType != "Ljava/lang/String;") continue
+
+            val targetClass = classIndex[ref.definingClass] ?: continue
+            val targetMethod = targetClass.methods.find { m ->
+                m.name == ref.name &&
+                        m.parameterTypes.size == ref.parameterTypes.size &&
+                        m.parameterTypes.zip(ref.parameterTypes).all { (a, b) -> a.toString() == b.toString() }
+            } ?: continue
+            val impl = targetMethod.implementation ?: continue
+
+            val targetIsStatic = targetMethod.accessFlags and 0x0008 != 0
+            val paramSlotOffset = if (targetIsStatic) 0 else 1
+            var regOffset = paramSlotOffset
+            for (p in 0 until paramIndex) {
+                val pType = ref.parameterTypes[p].toString()
+                regOffset += if (pType == "J" || pType == "D") 2 else 1
+            }
+            val paramReg = impl.registerCount - computeParamSize(ref, targetIsStatic) + regOffset
+
+            val targetInstructions = impl.instructions.toList()
+            val targetCfg = MethodCFG(targetInstructions, impl.tryBlocks)
+            val targetCfgStrings = targetCfg.computeStringRegisters()
+
+            // First try: whole-method scan for string switch (hashCode + equals)
+            val switchValues = scanStringSwitchValues(targetInstructions, 0, paramReg, targetCfgStrings)
+            if (switchValues.isNotEmpty()) return switchValues
+
+            // Fallback: linear scan for direct equals comparisons
+            val scanResult = scanStringValues(targetInstructions, 0, paramReg, targetCfgStrings, window = 40)
+            if (scanResult.values.isNotEmpty()) return scanResult.values
+        }
+        return emptyList()
+    }
+
     // --- Private helpers ---
+
+    /**
+     * Scan ALL remaining instructions for equals() on [stringReg].
+     * Used after detecting hashCode() → string switch pattern, where equals() calls
+     * are in switch branch targets (not linearly ahead).
+     */
+    private fun scanStringSwitchValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        stringReg: Int,
+        cfgStrings: Array<Map<Int, String>?>
+    ): List<String> {
+        val values = mutableSetOf<String>()
+        for (i in startIndex until instructions.size) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+
+            if (ref.definingClass == "Ljava/lang/String;" &&
+                (ref.name == "equals" || ref.name == "equalsIgnoreCase")
+            ) {
+                val regStrings = cfgStrings[i] ?: continue
+                when {
+                    instr.registerC == stringReg -> regStrings[instr.registerD]?.let { values.add(it) }
+                    instr.registerD == stringReg -> regStrings[instr.registerC]?.let { values.add(it) }
+                }
+            }
+        }
+        return values.toList()
+    }
 
     /** Extract the string constant being compared to [trackedReg] in an equals call. */
     private fun extractComparedValue(

@@ -250,6 +250,12 @@ class IntentExtraExtractor(
                     values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
                     values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
                 }
+                // Inter-procedural: follow string extra into called methods
+                if (values.isEmpty()) {
+                    values.addAll(ForwardValueScanner.resolveStringEnumValues(
+                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings
+                    ))
+                }
             } else if (ref.name in intResultTypes) {
                 values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
                 values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg))
@@ -311,6 +317,11 @@ class IntentExtraExtractor(
                 if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
                     values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
                     values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                }
+                if (values.isEmpty()) {
+                    values.addAll(ForwardValueScanner.resolveStringEnumValues(
+                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings
+                    ))
                 }
             } else if (type in listOf("Int", "Short", "Byte")) {
                 values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
