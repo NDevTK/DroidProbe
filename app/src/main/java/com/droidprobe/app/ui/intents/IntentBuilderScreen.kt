@@ -155,6 +155,7 @@ fun IntentBuilderScreen(
                     val isExpanded = uiState.expandedTarget?.component?.name == target.component.name
                     TargetCard(
                         target = target,
+                        packageName = uiState.packageName,
                         isExpanded = isExpanded,
                         extras = if (isExpanded) uiState.extras else emptyList(),
                         queryParams = if (isExpanded) uiState.queryParams else emptyList(),
@@ -215,6 +216,7 @@ fun IntentBuilderScreen(
 @Composable
 private fun TargetCard(
     target: LaunchableTarget,
+    packageName: String,
     isExpanded: Boolean,
     extras: List<ExtraEntry>,
     queryParams: List<QueryParamEntry>,
@@ -332,11 +334,14 @@ private fun TargetCard(
             }
 
             // Action buttons
+            val isBrowsable = target.categories.any { it == "android.intent.category.BROWSABLE" }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 FilledTonalButton(
                     onClick = onQuickLaunch,
@@ -357,6 +362,27 @@ private fun TargetCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Details")
+                    }
+                }
+
+                if (isBrowsable) {
+                    val context = LocalContext.current
+                    val shareLink = buildShareableLink(target, packageName, dataUri, queryParams)
+                    IconButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Deep Link", shareLink))
+                        Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Default.ContentCopy, "Copy Link")
+                    }
+                    IconButton(onClick = {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, shareLink)
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "Share Link"))
+                    }) {
+                        Icon(Icons.Default.Share, "Share Link")
                     }
                 }
             }
@@ -473,49 +499,93 @@ private fun TargetCard(
                         }
                     }
 
-                    val isBrowsable = target.categories.any { it == "android.intent.category.BROWSABLE" }
-                    val showLinkActions = isBrowsable && dataUri.isNotBlank()
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    FilledTonalButton(
+                        onClick = onLaunchWithExtras,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        FilledTonalButton(
-                            onClick = onLaunchWithExtras,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, null)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
-                        }
-
-                        if (showLinkActions) {
-                            val context = LocalContext.current
-                            IconButton(onClick = {
-                                val fullUri = buildFullUri(dataUri, queryParams)
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Deep Link", fullUri))
-                                Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
-                            }) {
-                                Icon(Icons.Default.ContentCopy, "Copy Link")
-                            }
-                            IconButton(onClick = {
-                                val fullUri = buildFullUri(dataUri, queryParams)
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, fullUri)
-                                }
-                                context.startActivity(Intent.createChooser(shareIntent, "Share Link"))
-                            }) {
-                                Icon(Icons.Default.Share, "Share Link")
-                            }
-                        }
+                        Icon(Icons.AutoMirrored.Filled.Send, null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (dataUri.isNotBlank()) "Launch with Data URI" else "Launch with Extras")
                     }
                 }
             }
         }
     }
+}
+
+private fun buildShareableLink(
+    target: LaunchableTarget,
+    packageName: String,
+    selectedDataUri: String,
+    queryParams: List<QueryParamEntry>
+): String {
+    // 1. If a data URI is actively selected (expanded card), use it with query params
+    if (selectedDataUri.isNotBlank()) {
+        return buildFullUri(selectedDataUri, queryParams)
+    }
+
+    // 2. If discovered data URIs have a custom scheme, use the first one
+    val customSchemeUri = target.discoveredDataUris.firstOrNull { uri ->
+        val scheme = uri.substringBefore("://", "")
+        scheme.isNotEmpty() && scheme !in setOf("content", "http", "https")
+    }
+    if (customSchemeUri != null) return customSchemeUri
+
+    // 3. Try to build a custom-scheme URI from manifest intent filter data
+    val browsableFilter = target.component.intentFilters.firstOrNull { filter ->
+        filter.categories.contains("android.intent.category.BROWSABLE")
+    }
+    if (browsableFilter != null) {
+        val scheme = browsableFilter.dataSchemes.firstOrNull { it !in setOf("http", "https") }
+        if (scheme != null) {
+            val authority = browsableFilter.dataAuthorities.firstOrNull() ?: ""
+            val path = browsableFilter.dataPaths.firstOrNull() ?: ""
+            return "$scheme://$authority$path"
+        }
+    }
+
+    // 4. Fallback: intent:// URI
+    return buildIntentUri(target, packageName)
+}
+
+/**
+ * Build an Android intent:// URI for sharing browsable intents that don't have
+ * a custom scheme. Format: intent://HOST/PATH#Intent;scheme=SCHEME;action=ACTION;
+ * category=CATEGORY;package=PACKAGE;end
+ */
+private fun buildIntentUri(target: LaunchableTarget, packageName: String): String {
+    val browsableFilter = target.component.intentFilters.firstOrNull { filter ->
+        filter.categories.contains("android.intent.category.BROWSABLE")
+    }
+
+    val sb = StringBuilder("intent://")
+
+    // Add host/path from manifest data
+    val authority = browsableFilter?.dataAuthorities?.firstOrNull()
+    val path = browsableFilter?.dataPaths?.firstOrNull()
+    if (authority != null) sb.append(authority)
+    if (path != null) sb.append(path)
+
+    sb.append("#Intent")
+
+    // Scheme
+    val scheme = browsableFilter?.dataSchemes?.firstOrNull()
+        ?: target.dataSchemes.firstOrNull()
+    if (scheme != null) sb.append(";scheme=$scheme")
+
+    // Action
+    val action = browsableFilter?.actions?.firstOrNull()
+        ?: target.actions.firstOrNull()
+    if (action != null) sb.append(";action=$action")
+
+    // Categories
+    target.categories.forEach { sb.append(";category=$it") }
+
+    // Package
+    sb.append(";package=$packageName")
+
+    sb.append(";end")
+    return sb.toString()
 }
 
 private fun buildFullUri(dataUri: String, queryParams: List<QueryParamEntry>): String {
