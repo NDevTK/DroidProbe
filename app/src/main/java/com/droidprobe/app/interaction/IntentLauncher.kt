@@ -1,11 +1,20 @@
 package com.droidprobe.app.interaction
 
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 
 class IntentLauncher(private val context: Context) {
+
+    data class BroadcastResult(
+        val resultCode: Int,
+        val resultData: String?,
+        val resultExtras: Map<String, String>
+    )
 
     sealed class TypedExtra {
         data class StringExtra(val value: String) : TypedExtra()
@@ -30,7 +39,7 @@ class IntentLauncher(private val context: Context) {
     fun buildIntent(params: IntentParams): Intent {
         return Intent().apply {
             params.action?.takeIf { it.isNotBlank() }?.let { action = it }
-            params.data?.let { data = it }
+            params.data?.let { uri -> data = uri }
             params.type?.takeIf { it.isNotBlank() }?.let { type = it }
             if (!params.componentPackage.isNullOrBlank() && !params.componentClass.isNullOrBlank()) {
                 component = ComponentName(params.componentPackage, params.componentClass)
@@ -72,6 +81,45 @@ class IntentLauncher(private val context: Context) {
     fun sendBroadcast(intent: Intent): Result<Unit> {
         return try {
             context.sendBroadcast(intent)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Send an ordered broadcast and capture the result via a final result receiver.
+     * The [onResult] callback fires on the main thread with resultCode, resultData,
+     * and any result extras the receiver set.
+     */
+    fun sendOrderedBroadcast(intent: Intent, onResult: (BroadcastResult) -> Unit): Result<Unit> {
+        return try {
+            val resultReceiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    val extras = getResultExtras(true)
+                    val extraMap = mutableMapOf<String, String>()
+                    extras?.let { bundle ->
+                        for (key in bundle.keySet()) {
+                            @Suppress("DEPRECATION")
+                            extraMap[key] = bundle.get(key)?.toString() ?: "null"
+                        }
+                    }
+                    onResult(BroadcastResult(
+                        resultCode = resultCode,
+                        resultData = resultData,
+                        resultExtras = extraMap
+                    ))
+                }
+            }
+            context.sendOrderedBroadcast(
+                intent,
+                null,  // receiverPermission
+                resultReceiver,
+                Handler(Looper.getMainLooper()),
+                0,     // initialCode
+                null,  // initialData
+                null   // initialExtras
+            )
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

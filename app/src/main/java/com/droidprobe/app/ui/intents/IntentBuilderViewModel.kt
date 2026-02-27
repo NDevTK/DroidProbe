@@ -297,10 +297,24 @@ class IntentBuilderViewModel(
 
         val intent = intentLauncher.buildIntent(params)
 
+        if (target.type == "Receiver") {
+            intentLauncher.sendOrderedBroadcast(intent) { br ->
+                val parts = mutableListOf<String>()
+                parts.add("resultCode=${br.resultCode}")
+                if (br.resultData != null) parts.add("resultData=\"${br.resultData}\"")
+                if (br.resultExtras.isNotEmpty()) {
+                    parts.add("extras={${br.resultExtras.entries.joinToString { "${it.key}=${it.value}" }}}")
+                }
+                _uiState.update { it.copy(result = "Broadcast result: ${parts.joinToString(", ")}") }
+            }.onFailure { e ->
+                _uiState.update { it.copy(error = e.message ?: "Broadcast failed") }
+            }
+            return
+        }
+
         val result = when (target.type) {
             "Activity" -> intentLauncher.launchActivity(intent)
             "Service" -> intentLauncher.startService(intent).map { }
-            "Receiver" -> intentLauncher.sendBroadcast(intent)
             else -> intentLauncher.launchActivity(intent)
         }
 
