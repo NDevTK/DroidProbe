@@ -1,5 +1,7 @@
 package com.droidprobe.app.data.model
 
+data class SensitiveString(val value: String, val category: String)
+
 data class DexAnalysis(
     val packageName: String,
     val contentProviderUris: List<ContentProviderInfo>,
@@ -7,5 +9,7 @@ data class DexAnalysis(
     val fileProviderPaths: List<FileProviderInfo>,
     val rawContentUriStrings: List<String>,
     val deepLinkUriStrings: List<String> = emptyList(),
-    val contentProviderCalls: List<ContentProviderCallInfo> = emptyList()
+    val contentProviderCalls: List<ContentProviderCallInfo> = emptyList(),
+    val allUrlStrings: List<String> = emptyList(),
+    val sensitiveStrings: List<SensitiveString> = emptyList()
 )

@@ -121,7 +121,9 @@ class DexAnalyzer {
             fileProviderPaths = fileProviderExtractor.getResults(),
             rawContentUriStrings = stringCollector.getContentUriStrings(),
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
-            contentProviderCalls = callExtractor.getResults()
+            contentProviderCalls = callExtractor.getResults(),
+            allUrlStrings = stringCollector.getAllUrlStrings(),
+            sensitiveStrings = stringCollector.getSensitiveStrings()
         )
     }
 
