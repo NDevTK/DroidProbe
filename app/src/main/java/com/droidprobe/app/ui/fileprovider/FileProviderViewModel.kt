@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 data class ProbablePath(
     val info: FileProviderInfo,
     val uri: String,
+    val key: String,
     val result: FileProviderAccessor.FileInfo? = null,
     val isProbing: Boolean = false
 )
@@ -43,23 +44,61 @@ class FileProviderViewModel(
     }
 
     private fun loadDiscoveredPaths() {
-        val dex = analysisRepository.getCachedDex(packageName)
-        val paths = (dex?.fileProviderPaths ?: emptyList()).map { info ->
-            ProbablePath(
-                info = info,
-                uri = "content://${info.authority}/${info.name}"
-            )
+        val allInfos = analysisRepository.getCachedDex(packageName)?.fileProviderPaths ?: emptyList()
+        val seen = mutableSetOf<String>()
+        val paths = mutableListOf<ProbablePath>()
+
+        // Separate XML config roots from code-reference entries, grouped by authority
+        val byAuthority = allInfos.groupBy { it.authority }
+
+        for ((authority, infos) in byAuthority) {
+            val xmlRoots = infos.filter { it.pathType != "code-reference" }
+            val codeRefs = infos.filter { it.pathType == "code-reference" && it.filePath != null }
+
+            // For each code-discovered file, create a ProbablePath per XML root
+            for (codeRef in codeRefs) {
+                val filePath = codeRef.filePath ?: continue
+                for (root in xmlRoots) {
+                    val uri = "content://$authority/${root.name}/$filePath"
+                    val key = "$authority:${root.name}:$filePath"
+                    if (!seen.add(key)) continue
+                    paths.add(
+                        ProbablePath(
+                            info = root.copy(filePath = filePath),
+                            uri = uri,
+                            key = key
+                        )
+                    )
+                }
+                // If no XML roots found, still create an entry with just authority + filePath
+                if (xmlRoots.isEmpty()) {
+                    val uri = "content://$authority/$filePath"
+                    val key = "$authority:code:$filePath"
+                    if (!seen.add(key)) continue
+                    paths.add(ProbablePath(info = codeRef, uri = uri, key = key))
+                }
+            }
+
+            // XML roots with no matching code file paths — keep as root-only
+            if (codeRefs.isEmpty()) {
+                for (root in xmlRoots) {
+                    val uri = "content://$authority/${root.name}/"
+                    val key = "$authority:${root.pathType}:${root.path}:${root.name}"
+                    if (!seen.add(key)) continue
+                    paths.add(ProbablePath(info = root, uri = uri, key = key))
+                }
+            }
         }
+
         _uiState.update { it.copy(paths = paths) }
     }
 
     fun probePath(path: ProbablePath) {
         viewModelScope.launch {
-            // Mark this path as probing
             _uiState.update { state ->
                 state.copy(
                     paths = state.paths.map {
-                        if (it.uri == path.uri) it.copy(isProbing = true) else it
+                        if (it.key == path.key) it.copy(isProbing = true) else it
                     },
                     error = null
                 )
@@ -71,7 +110,7 @@ class FileProviderViewModel(
                 _uiState.update { state ->
                     state.copy(
                         paths = state.paths.map {
-                            if (it.uri == path.uri) it.copy(result = result, isProbing = false) else it
+                            if (it.key == path.key) it.copy(result = result, isProbing = false) else it
                         }
                     )
                 }
@@ -79,7 +118,7 @@ class FileProviderViewModel(
                 _uiState.update { state ->
                     state.copy(
                         paths = state.paths.map {
-                            if (it.uri == path.uri) it.copy(isProbing = false) else it
+                            if (it.key == path.key) it.copy(isProbing = false) else it
                         },
                         error = e.message
                     )

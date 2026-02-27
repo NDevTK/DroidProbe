@@ -125,7 +125,7 @@ fun FileProviderScreen(
                 }
             }
 
-            items(uiState.paths, key = { it.uri }) { path ->
+            items(uiState.paths, key = { it.key }) { path ->
                 FilePathCard(
                     path = path,
                     onProbe = { viewModel.probePath(path) }

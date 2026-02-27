@@ -4,7 +4,6 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.ProviderComponent
 import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.interaction.ContentProviderInteractor
@@ -14,25 +13,21 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/**
- * Represents a queryable URI entry in the UI — either from DEX analysis or manifest authorities.
- */
 data class QueryableUri(
     val uri: String,
-    val source: String,        // "DEX" or "Manifest"
-    val sourceClass: String?,  // class where found (DEX only)
+    val source: String,
+    val sourceClass: String?,
     val matchCode: Int?,
-    val columns: List<String>
+    val columns: List<String>,
+    val result: ContentProviderInteractor.QueryResult? = null,
+    val isQuerying: Boolean = false
 )
 
 data class ContentProviderUiState(
     val packageName: String = "",
     val providers: List<ProviderComponent> = emptyList(),
     val queryableUris: List<QueryableUri> = emptyList(),
-    // Active query
-    val selectedUri: QueryableUri? = null,
-    val queryResult: ContentProviderInteractor.QueryResult? = null,
-    val isExecuting: Boolean = false,
+    val expandedUri: String? = null,
     val error: String? = null
 )
 
@@ -57,7 +52,6 @@ class ContentProviderViewModel(
 
                 val uris = mutableListOf<QueryableUri>()
 
-                // Add URIs from DEX analysis (only content:// URIs are queryable)
                 dex?.contentProviderUris
                     ?.filter { it.uriPattern.startsWith("content://") }
                     ?.forEach { info ->
@@ -73,7 +67,6 @@ class ContentProviderViewModel(
                         )
                     }
 
-                // Add raw content:// strings from DEX that weren't already found
                 val knownUris = uris.map { it.uri }.toSet()
                 dex?.rawContentUriStrings?.forEach { raw ->
                     if (raw !in knownUris) {
@@ -89,7 +82,6 @@ class ContentProviderViewModel(
                     }
                 }
 
-                // Add manifest authorities as base URIs if no DEX URIs found for them
                 val dexAuthorities = uris.mapNotNull { Uri.parse(it.uri).authority }.toSet()
                 manifest.providers.filter { it.isExported }.forEach { provider ->
                     val auth = provider.authority ?: return@forEach
@@ -118,35 +110,62 @@ class ContentProviderViewModel(
 
     fun queryUri(queryableUri: QueryableUri) {
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(selectedUri = queryableUri, isExecuting = true, error = null, queryResult = null)
+            _uiState.update { state ->
+                state.copy(
+                    queryableUris = state.queryableUris.map {
+                        if (it.uri == queryableUri.uri) it.copy(isQuerying = true) else it
+                    },
+                    error = null
+                )
             }
             try {
                 val result = interactor.query(
                     ContentProviderInteractor.QueryParams(
                         uri = Uri.parse(queryableUri.uri),
-                        projection = null, // all columns
+                        projection = null,
                         selection = null,
                         selectionArgs = null,
                         sortOrder = null
                     )
                 )
-                _uiState.update {
-                    it.copy(queryResult = result, isExecuting = false)
-                }
-                if (result.error != null) {
-                    _uiState.update { it.copy(error = result.error) }
+                _uiState.update { state ->
+                    state.copy(
+                        queryableUris = state.queryableUris.map {
+                            if (it.uri == queryableUri.uri) it.copy(
+                                result = result,
+                                isQuerying = false
+                            ) else it
+                        },
+                        expandedUri = queryableUri.uri,
+                        error = if (result.error != null) result.error else null
+                    )
                 }
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(isExecuting = false, error = e.message ?: "Query failed")
+                _uiState.update { state ->
+                    state.copy(
+                        queryableUris = state.queryableUris.map {
+                            if (it.uri == queryableUri.uri) it.copy(
+                                result = ContentProviderInteractor.QueryResult(
+                                    emptyList(), emptyList(), 0, e.message ?: "Query failed"
+                                ),
+                                isQuerying = false
+                            ) else it
+                        },
+                        error = e.message
+                    )
                 }
             }
         }
     }
 
-    fun clearResult() {
-        _uiState.update { it.copy(selectedUri = null, queryResult = null, error = null) }
+    fun queryAll() {
+        _uiState.value.queryableUris.filter { it.result == null }.forEach { queryUri(it) }
+    }
+
+    fun toggleExpand(uri: String) {
+        _uiState.update {
+            it.copy(expandedUri = if (it.expandedUri == uri) null else uri)
+        }
     }
 
     class Factory(

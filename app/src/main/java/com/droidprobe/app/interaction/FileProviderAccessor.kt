@@ -19,11 +19,20 @@ class FileProviderAccessor(private val contentResolver: ContentResolver) {
     )
 
     suspend fun probeUri(uri: Uri): FileInfo = withContext(Dispatchers.IO) {
-        try {
-            val mimeType = contentResolver.getType(uri)
-            var name: String? = null
-            var size: Long? = null
+        // Check if the provider authority is reachable at all
+        val authority = uri.authority ?: ""
+        val client = contentResolver.acquireContentProviderClient(authority)
+        if (client == null) {
+            return@withContext FileInfo(uri, null, null, null, false, null, "Provider not found")
+        }
+        client.close()
 
+        // Provider exists — try to read file metadata individually
+        val mimeType = try { contentResolver.getType(uri) } catch (_: Exception) { null }
+
+        var name: String? = null
+        var size: Long? = null
+        try {
             contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -32,34 +41,27 @@ class FileProviderAccessor(private val contentResolver: ContentResolver) {
                     if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
                 }
             }
+        } catch (_: Exception) { }
 
-            // Try to read a preview
-            var preview: String? = null
-            try {
-                contentResolver.openInputStream(uri)?.use { stream ->
-                    val bytes = ByteArray(2048)
-                    val read = stream.read(bytes)
-                    if (read > 0) {
-                        preview = String(bytes, 0, read, Charsets.UTF_8)
-                    }
+        var preview: String? = null
+        try {
+            contentResolver.openInputStream(uri)?.use { stream ->
+                val bytes = ByteArray(2048)
+                val read = stream.read(bytes)
+                if (read > 0) {
+                    preview = String(bytes, 0, read, Charsets.UTF_8)
                 }
-            } catch (_: Exception) {
-                // Can't read content, but URI might still be valid
             }
+        } catch (_: Exception) { }
 
-            FileInfo(
-                uri = uri,
-                name = name,
-                size = size,
-                mimeType = mimeType,
-                isAccessible = true,
-                previewText = preview,
-                error = null
-            )
-        } catch (e: SecurityException) {
-            FileInfo(uri, null, null, null, false, null, "Access denied: ${e.message}")
-        } catch (e: Exception) {
-            FileInfo(uri, null, null, null, false, null, "${e.javaClass.simpleName}: ${e.message}")
-        }
+        FileInfo(
+            uri = uri,
+            name = name,
+            size = size,
+            mimeType = mimeType,
+            isAccessible = true,
+            previewText = preview,
+            error = null
+        )
     }
 }

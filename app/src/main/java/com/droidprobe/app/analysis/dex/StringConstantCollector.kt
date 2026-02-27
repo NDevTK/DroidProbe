@@ -37,7 +37,7 @@ class StringConstantCollector {
     }
 
     fun getContentUriStrings(): List<String> =
-        allStrings.filter { it.startsWith("content://") }.sorted()
+        allStrings.filter { it.startsWith("content://") && it.length > 10 }.sorted()
 
     fun getDeepLinkUriStrings(): List<String> =
         allStrings.filter { s ->

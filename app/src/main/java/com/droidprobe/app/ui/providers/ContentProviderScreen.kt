@@ -1,5 +1,6 @@
 package com.droidprobe.app.ui.providers
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +18,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,8 +89,7 @@ fun ContentProviderScreen(
                 .padding(padding),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // No URIs discovered
-            if (uiState.queryableUris.isEmpty() && !uiState.isExecuting) {
+            if (uiState.queryableUris.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
@@ -103,14 +106,36 @@ fun ContentProviderScreen(
                 }
             }
 
-            // Discovered URIs — tap to query
-            items(uiState.queryableUris) { queryable ->
-                val isSelected = uiState.selectedUri?.uri == queryable.uri
+            // Query All button
+            if (uiState.queryableUris.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${uiState.queryableUris.size} discovered URIs",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FilledTonalButton(onClick = { viewModel.queryAll() }) {
+                            Icon(Icons.Default.Search, null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Query All")
+                        }
+                    }
+                }
+            }
+
+            items(uiState.queryableUris, key = { it.uri }) { queryable ->
                 QueryableUriCard(
                     queryable = queryable,
-                    isSelected = isSelected,
-                    isQuerying = isSelected && uiState.isExecuting,
-                    onClick = { viewModel.queryUri(queryable) }
+                    isExpanded = uiState.expandedUri == queryable.uri,
+                    onQuery = { viewModel.queryUri(queryable) },
+                    onToggleExpand = { viewModel.toggleExpand(queryable.uri) }
                 )
             }
 
@@ -133,36 +158,6 @@ fun ContentProviderScreen(
                 }
             }
 
-            // Query results
-            val result = uiState.queryResult
-            if (result != null && result.columns.isNotEmpty()) {
-                item {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${result.rowCount} rows (showing ${result.rows.size})",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        FilledTonalButton(onClick = { viewModel.clearResult() }) {
-                            Text("Clear")
-                        }
-                    }
-                }
-                item {
-                    ResultTable(
-                        columns = result.columns,
-                        rows = result.rows,
-                        modifier = Modifier.padding(horizontal = 12.dp)
-                    )
-                }
-            }
-
             item { Spacer(modifier = Modifier.height(32.dp)) }
         }
     }
@@ -171,67 +166,119 @@ fun ContentProviderScreen(
 @Composable
 private fun QueryableUriCard(
     queryable: QueryableUri,
-    isSelected: Boolean,
-    isQuerying: Boolean,
-    onClick: () -> Unit
+    isExpanded: Boolean,
+    onQuery: () -> Unit,
+    onToggleExpand: () -> Unit
 ) {
+    val hasResult = queryable.result != null
+    val isSuccess = hasResult && queryable.result!!.error == null
+    val isError = hasResult && queryable.result!!.error != null
+
     Card(
-        onClick = onClick,
+        onClick = if (hasResult) onToggleExpand else onQuery,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surface
+            containerColor = when {
+                isSuccess -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                isError -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                else -> MaterialTheme.colorScheme.surface
+            }
         )
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = queryable.uri,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = queryable.uri,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
 
-                Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SourceBadge(queryable.source)
-                    if (queryable.matchCode != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        SourceBadge(queryable.source)
+                        if (queryable.matchCode != null) {
+                            Text(
+                                text = "code: ${queryable.matchCode}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    queryable.sourceClass?.let { cls ->
                         Text(
-                            text = "code: ${queryable.matchCode}",
+                            text = cls,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                queryable.sourceClass?.let { cls ->
-                    Text(
-                        text = cls,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                Spacer(modifier = Modifier.width(8.dp))
+
+                when {
+                    queryable.isQuerying -> CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    isSuccess -> Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = "Success",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    isError -> Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Error",
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    else -> Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = "Query",
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            // Result summary
+            if (hasResult) {
+                val result = queryable.result!!
+                Spacer(modifier = Modifier.height(4.dp))
+                if (result.error != null) {
+                    Text(
+                        text = result.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2
+                    )
+                } else {
+                    Text(
+                        text = "${result.rowCount} rows · ${result.columns.size} columns",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
 
-            if (isQuerying) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-            } else {
-                Icon(
-                    Icons.Default.PlayArrow,
-                    contentDescription = "Query",
-                    tint = MaterialTheme.colorScheme.primary
-                )
+            // Expanded result table
+            AnimatedVisibility(visible = isExpanded && isSuccess) {
+                queryable.result?.let { result ->
+                    if (result.columns.isNotEmpty()) {
+                        Column(modifier = Modifier.padding(top = 8.dp)) {
+                            ResultTable(
+                                columns = result.columns,
+                                rows = result.rows
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -276,7 +323,6 @@ private fun ResultTable(
                 .horizontalScroll(scrollState)
                 .padding(8.dp)
         ) {
-            // Header
             Row {
                 columns.forEach { col ->
                     Box(modifier = Modifier
@@ -295,7 +341,6 @@ private fun ResultTable(
 
             HorizontalDivider()
 
-            // Rows
             rows.forEach { row ->
                 Row {
                     row.forEach { cell ->

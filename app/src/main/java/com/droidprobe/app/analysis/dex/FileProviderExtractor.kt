@@ -5,15 +5,15 @@ import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
+import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.StringReference
+import com.droidprobe.app.analysis.AxmlParser
 import com.droidprobe.app.data.model.FileProviderInfo
 import com.droidprobe.app.data.model.ManifestAnalysis
-import org.xmlpull.v1.XmlPullParser
-import org.xmlpull.v1.XmlPullParserFactory
 import java.io.File
-import java.io.StringReader
 import java.util.zip.ZipFile
 
 /**
@@ -46,7 +46,6 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
         try {
             val zipFile = ZipFile(File(apkPath))
             try {
-                // Look for XML files in res/xml/ that might be file provider configs
                 val xmlEntries = zipFile.entries().asSequence()
                     .filter { entry ->
                         entry.name.startsWith("res/xml/") && entry.name.endsWith(".xml")
@@ -56,9 +55,6 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 for (entry in xmlEntries) {
                     try {
                         val bytes = zipFile.getInputStream(entry).use { it.readBytes() }
-                        // Android binary XML (AXML) starts with specific magic bytes
-                        // We can try to detect file_paths content by checking for known tag names
-                        // in the binary. Binary XML parsing is complex, so we look for string patterns.
                         parseResourceXml(bytes, entry.name)
                     } catch (_: Exception) {
                         // Skip unparseable XML files
@@ -82,81 +78,35 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
 
     fun getResults(): List<FileProviderInfo> = results.toList()
 
+    private val PATH_TYPES = setOf(
+        "root-path", "files-path", "cache-path", "external-path",
+        "external-files-path", "external-cache-path", "external-media-path"
+    )
+
     /**
-     * Parse binary XML resources looking for FileProvider path patterns.
-     * Android binary XML encodes strings in a string pool — we can search for
-     * known FileProvider XML element names in the raw bytes.
+     * Parse binary XML resource using proper AXML parsing to extract
+     * FileProvider path element names and attributes.
      */
     private fun parseResourceXml(bytes: ByteArray, fileName: String) {
-        // Known FileProvider path element types
-        val pathTypes = listOf(
-            "root-path", "files-path", "cache-path", "external-path",
-            "external-files-path", "external-cache-path", "external-media-path"
-        )
-
-        // Check if this XML likely contains FileProvider paths by searching for known strings
-        val content = String(bytes, Charsets.UTF_8) // Won't fully work for binary XML but catches strings
-        val containsPathTypes = pathTypes.any { content.contains(it) }
-
-        if (!containsPathTypes) return
-
-        // Extract string patterns from binary XML
-        // Binary XML stores strings in a pool at the beginning of the file.
-        // We scan for readable UTF-16LE encoded strings that match known patterns.
-        val extractedStrings = extractStringsFromBinaryXml(bytes)
-
-        // Reconstruct FileProvider paths from extracted strings
+        val events = AxmlParser().parse(bytes) ?: return
         val authority = fileProviderAuthorities.keys.firstOrNull() ?: "unknown"
 
-        for (pathType in pathTypes) {
-            if (pathType in extractedStrings) {
-                // Look for associated "name" and "path" attributes
-                val nameAttrs = extractedStrings.filter {
-                    it.length < 100 && !it.contains('/') && !it.contains('.') &&
-                            it != pathType && it.matches(Regex("[a-zA-Z_][a-zA-Z0-9_]*"))
-                }
-                val pathAttrs = extractedStrings.filter {
-                    it.length < 200 && (it == "." || it == "/" || it.contains('/') ||
-                            it.matches(Regex("[a-zA-Z0-9_./]+"))) && it != pathType
-                }
-
-                val name = nameAttrs.firstOrNull() ?: pathType
-                val path = pathAttrs.firstOrNull() ?: "."
-
-                addResult(authority, pathType, path, name)
+        for (event in events) {
+            if (event is AxmlParser.XmlEvent.StartElement && event.name in PATH_TYPES) {
+                addResult(
+                    authority = authority,
+                    pathType = event.name,
+                    path = event.attributes["path"] ?: ".",
+                    name = event.attributes["name"] ?: event.name
+                )
             }
         }
-    }
-
-    /**
-     * Extract readable strings from Android binary XML.
-     * The string pool in binary XML contains UTF-16LE encoded strings.
-     */
-    private fun extractStringsFromBinaryXml(bytes: ByteArray): Set<String> {
-        val strings = mutableSetOf<String>()
-
-        // Look for UTF-8 readable strings in the byte array
-        val sb = StringBuilder()
-        for (b in bytes) {
-            val c = b.toInt().toChar()
-            if (c.isLetterOrDigit() || c in ".-_/") {
-                sb.append(c)
-            } else {
-                if (sb.length >= 2) {
-                    strings.add(sb.toString())
-                }
-                sb.clear()
-            }
-        }
-        if (sb.length >= 2) {
-            strings.add(sb.toString())
-        }
-
-        return strings
     }
 
     /**
      * Scan DEX for FileProvider.getUriForFile() calls to discover file access patterns.
+     * getUriForFile is static: invoke-static {context, authority, file}
+     *   arg0 = Context, arg1 = String authority, arg2 = File file
      */
     private fun scanForFileProviderUsage(classDef: DexBackedClassDef, instructions: List<Instruction>) {
         for ((i, instr) in instructions.withIndex()) {
@@ -167,21 +117,120 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
             if (ref.definingClass == "Landroidx/core/content/FileProvider;" &&
                 ref.name == "getUriForFile"
             ) {
-                // getUriForFile(context, authority, file)
-                val callInstr = instr as? Instruction35c ?: continue
-                val authorityReg = callInstr.registerE
-                val authority = resolveStringFromRegister(instructions, i, authorityReg)
+                // Handle both invoke-static (35c) and invoke-static/range (3rc)
+                val authorityReg: Int
+                val fileReg: Int
+                when (instr) {
+                    is Instruction35c -> {
+                        authorityReg = instr.registerD
+                        fileReg = instr.registerE
+                    }
+                    is Instruction3rc -> {
+                        authorityReg = instr.startRegister + 1
+                        fileReg = instr.startRegister + 2
+                    }
+                    else -> continue
+                }
 
-                if (authority != null && authority !in seenPaths) {
-                    addResult(
-                        authority = authority,
-                        pathType = "code-reference",
-                        path = ".",
-                        name = "getUriForFile"
-                    )
+                val authority = resolveStringFromRegister(instructions, i, authorityReg)
+                    ?: continue
+                val fileRegResolved = resolveRegisterAlias(instructions, i, fileReg)
+                val filePath = resolveFilePathFromRegister(instructions, i, fileRegResolved)
+
+                addResult(
+                    authority = authority,
+                    pathType = "code-reference",
+                    path = ".",
+                    name = filePath ?: "getUriForFile",
+                    filePath = filePath
+                )
+            }
+        }
+    }
+
+    /**
+     * Trace backward through move-object instructions to find the original register.
+     * e.g. if v6 was set by `move-object v6, v4`, returns v4.
+     */
+    private fun resolveRegisterAlias(
+        instructions: List<Instruction>,
+        callIndex: Int,
+        register: Int
+    ): Int {
+        for (j in callIndex - 1 downTo maxOf(0, callIndex - 30)) {
+            val instr = instructions[j]
+            if (instr.opcode == Opcode.MOVE_OBJECT ||
+                instr.opcode == Opcode.MOVE_OBJECT_FROM16 ||
+                instr.opcode == Opcode.MOVE_OBJECT_16
+            ) {
+                if (instr is TwoRegisterInstruction && instr.registerA == register) {
+                    return instr.registerB
                 }
             }
         }
+        return register
+    }
+
+    /**
+     * Resolve the filename from a File object register by scanning backward for
+     * the File constructor call and extracting its String argument.
+     *
+     * Handles:
+     *   File(File parent, String child) — (Ljava/io/File;Ljava/lang/String;)V
+     *   File(String path)               — (Ljava/lang/String;)V
+     *   File(String parent, String child)— (Ljava/lang/String;Ljava/lang/String;)V
+     */
+    private fun resolveFilePathFromRegister(
+        instructions: List<Instruction>,
+        callIndex: Int,
+        fileReg: Int
+    ): String? {
+        for (j in callIndex - 1 downTo maxOf(0, callIndex - 40)) {
+            val instr = instructions[j]
+            if (instr.opcode != Opcode.INVOKE_DIRECT) continue
+            if (instr !is ReferenceInstruction) continue
+
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+            if (ref.definingClass != "Ljava/io/File;" || ref.name != "<init>") continue
+
+            // Handle both invoke-direct (35c) and invoke-direct/range (3rc)
+            val thisReg: Int
+            val arg1Reg: Int
+            val arg2Reg: Int
+            when (instr) {
+                is Instruction35c -> {
+                    thisReg = instr.registerC
+                    arg1Reg = instr.registerD
+                    arg2Reg = instr.registerE
+                }
+                is Instruction3rc -> {
+                    thisReg = instr.startRegister
+                    arg1Reg = instr.startRegister + 1
+                    arg2Reg = instr.startRegister + 2
+                }
+                else -> continue
+            }
+            if (thisReg != fileReg) continue
+
+            val params = ref.parameterTypes.map { it.toString() }
+            return when (params) {
+                // File(File parent, String child) → child is arg2
+                listOf("Ljava/io/File;", "Ljava/lang/String;") ->
+                    resolveStringFromRegister(instructions, j, arg2Reg)
+
+                // File(String path) → path is arg1
+                listOf("Ljava/lang/String;") ->
+                    resolveStringFromRegister(instructions, j, arg1Reg)
+
+                // File(String parent, String child) → child is arg2
+                listOf("Ljava/lang/String;", "Ljava/lang/String;") ->
+                    resolveStringFromRegister(instructions, j, arg2Reg)
+
+                else -> null
+            }
+        }
+        return null
     }
 
     private fun resolveStringFromRegister(
@@ -201,8 +250,14 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
         return null
     }
 
-    private fun addResult(authority: String, pathType: String, path: String, name: String) {
-        val key = "$authority:$pathType:$path:$name"
+    private fun addResult(
+        authority: String,
+        pathType: String,
+        path: String,
+        name: String,
+        filePath: String? = null
+    ) {
+        val key = "$authority:$pathType:$path:$name:${filePath ?: ""}"
         if (key in seenPaths) return
         seenPaths.add(key)
 
@@ -211,7 +266,8 @@ class FileProviderExtractor(private val manifestAnalysis: ManifestAnalysis) {
                 authority = authority,
                 pathType = pathType,
                 path = path,
-                name = name
+                name = name,
+                filePath = filePath
             )
         )
     }
