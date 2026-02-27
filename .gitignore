@@ -5,6 +5,9 @@
 .DS_Store
 /build
 /captures
+/google_smali
+/Google.apk
+/apktool.jar
 .externalNativeBuild
 .cxx
 local.properties

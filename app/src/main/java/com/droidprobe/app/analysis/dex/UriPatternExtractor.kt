@@ -14,8 +14,8 @@ import com.android.tools.smali.dexlib2.iface.instruction.SwitchPayload
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.ManifestAnalysis
 
@@ -26,12 +26,16 @@ import com.droidprobe.app.data.model.ManifestAnalysis
  * 3. ContentUris.withAppendedId() calls
  * 4. Static fields named CONTENT_URI or *_URI
  * 5. Raw "content://" string constants as fallback
+ * 6. getQueryParameterNames() + Map.get("key") — bulk param reader pattern
  *
  * Uses forward register tracking so that string/int constants loaded once and reused
  * across many calls (e.g. an authority loaded once for 50+ addURI calls) are resolved
  * correctly regardless of distance from the call site.
  */
-class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
+class UriPatternExtractor(
+    private val manifestAnalysis: ManifestAnalysis,
+    private val classIndex: Map<String, DexBackedClassDef> = emptyMap()
+) {
 
     private val results = mutableListOf<ContentProviderInfo>()
     private val seenUris = mutableSetOf<String>()
@@ -63,6 +67,23 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
     // Default values for query parameters (param name → default value string)
     private val queryParamDefaultsByMatchCode = mutableMapOf<Int, MutableMap<String, String>>()
     private val queryParamDefaultsByClass = mutableMapOf<String, MutableMap<String, String>>()
+
+    /**
+     * Strategy 6: Bulk param reader detection.
+     * Methods that call Uri.getQueryParameterNames() and then read individual params
+     * via Map.get("key") (after stream-collecting into a Map).
+     */
+    private data class BulkParamReaderInfo(
+        val sourceClass: String,
+        val reconstructedUri: String?,         // scheme://host/path from URI validation
+        val sameMethodParams: MutableSet<String>,  // Map.get() keys found in same method
+        val associatedClasses: MutableSet<String>, // classes instantiated with the collected map
+        val paramValues: MutableMap<String, MutableSet<String>> = mutableMapOf(),
+        val paramTypes: MutableMap<String, String> = mutableMapOf() // key → "int", "boolean", etc.
+    )
+    private val bulkParamReaders = mutableListOf<BulkParamReaderInfo>()
+    // Classes that receive param maps via constructor (from bulk readers)
+    private val paramMapReceiverClasses = mutableSetOf<String>()
 
     /**
      * Pre-scan pass: detect methods that are wrappers around getQueryParameter /
@@ -137,6 +158,205 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         }
     }
 
+    /**
+     * Pre-scan pass: detect methods that call Uri.getQueryParameterNames() and read
+     * individual params via Map.get("key") after collecting into a Map.
+     *
+     * For each such method:
+     * - Reconstructs the validated URI from getScheme/getHost/getPath comparisons
+     * - Extracts Map.get("key") string constants as query parameter names
+     * - Records classes instantiated in the same method as "param-map receivers"
+     *
+     * Must be called for all classes BEFORE the main process() pass.
+     */
+    fun preScanForBulkParamReaders(classDef: DexBackedClassDef) {
+        for (method in classDef.methods) {
+            val impl = method.implementation ?: continue
+            val instructions = impl.instructions.toList()
+            if (instructions.isEmpty()) continue
+
+            // Check for getQueryParameterNames() call
+            var hasGetQueryParamNames = false
+            for (instr in instructions) {
+                if (instr !is ReferenceInstruction) continue
+                val ref = instr.reference
+                if (ref is MethodReference &&
+                    ref.definingClass == "Landroid/net/Uri;" &&
+                    ref.name == "getQueryParameterNames"
+                ) {
+                    hasGetQueryParamNames = true
+                    break
+                }
+            }
+            if (!hasGetQueryParamNames) continue
+
+            // Build CFG and compute string registers for this method
+            val cfg = MethodCFG(instructions, impl.tryBlocks)
+            val cfgStrings = cfg.computeStringRegisters()
+
+            // Detect URI validation: getScheme/getHost/getPath → equals comparison
+            var detectedScheme: String? = null
+            var detectedHost: String? = null
+            var detectedPath: String? = null
+            val mapGetKeys = mutableSetOf<String>()
+            val mapGetParamValues = mutableMapOf<String, MutableSet<String>>()
+            val mapGetParamTypes = mutableMapOf<String, String>()
+            val mapGetFieldMap = mutableMapOf<String, String>() // field ref → param key
+            val instantiatedClasses = mutableSetOf<String>()
+
+            for ((i, instr) in instructions.withIndex()) {
+                if (instr !is ReferenceInstruction) continue
+                val ref = instr.reference
+                if (ref !is MethodReference) continue
+
+                val regStrings = cfgStrings[i] ?: emptyMap()
+
+                // Detect Uri.getScheme/getHost/getPath followed by equals comparison
+                if (ref.definingClass == "Landroid/net/Uri;") {
+                    when (ref.name) {
+                        "getScheme" -> {
+                            val compared = findEqualsComparisonTarget(instructions, i, cfgStrings)
+                            if (compared != null) detectedScheme = compared
+                        }
+                        "getHost" -> {
+                            val compared = findEqualsComparisonTarget(instructions, i, cfgStrings)
+                            if (compared != null) detectedHost = compared
+                        }
+                        "getPath" -> {
+                            val compared = findEqualsComparisonTarget(instructions, i, cfgStrings)
+                            if (compared != null) detectedPath = compared
+                        }
+                    }
+                }
+
+                // Detect Map.get("stringConstant"): any .get(Object)Object call with string arg
+                if (ref.name == "get" &&
+                    ref.parameterTypes.size == 1 &&
+                    ref.parameterTypes[0].toString() == "Ljava/lang/Object;" &&
+                    ref.returnType == "Ljava/lang/Object;"
+                ) {
+                    if (instr is Instruction35c) {
+                        val key = regStrings[instr.registerD]
+                        if (key != null && key.isNotBlank() && !key.contains("://") && key.length < 50) {
+                            mapGetKeys.add(key)
+                            // Scan forward for type conversions and value comparisons
+                            val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
+                            if (resultReg != null) {
+                                val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, window = 40)
+                                if (scan.detectedType != null) mapGetParamTypes[key] = scan.detectedType
+                                if (scan.values.isNotEmpty()) mapGetParamValues.getOrPut(key) { mutableSetOf() }.addAll(scan.values)
+                                // If parseInt detected, scan for int values locally + inter-procedurally (enum)
+                                if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
+                                    val vals = mapGetParamValues.getOrPut(key) { mutableSetOf() }
+                                    vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                                    vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                                }
+                                if (scan.storedToField != null) {
+                                    mapGetFieldMap[scan.storedToField] = key
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Detect constructor calls: new SomeClass(...)
+                if (ref.name == "<init>" &&
+                    instr.opcode in listOf(Opcode.INVOKE_DIRECT, Opcode.INVOKE_DIRECT_RANGE)
+                ) {
+                    val targetClass = ref.definingClass
+                    if (!targetClass.startsWith("Ljava/") &&
+                        !targetClass.startsWith("Landroid/") &&
+                        !targetClass.startsWith("Lkotlin/")
+                    ) {
+                        instantiatedClasses.add(targetClass)
+                    }
+                }
+            }
+
+            // Field tracking: find iget-object reads of stored fields → forward-scan for values
+            scanFieldReadsForValues(instructions, cfgStrings, mapGetFieldMap, mapGetParamValues, mapGetParamTypes)
+
+            // Build reconstructed URI
+            val reconstructedUri = if (detectedScheme != null && detectedHost != null) {
+                val path = detectedPath ?: ""
+                "$detectedScheme://$detectedHost$path"
+            } else null
+
+            if (mapGetKeys.isEmpty() && instantiatedClasses.isEmpty()) continue
+
+            val info = BulkParamReaderInfo(
+                sourceClass = classDef.type,
+                reconstructedUri = reconstructedUri,
+                sameMethodParams = mapGetKeys,
+                associatedClasses = instantiatedClasses,
+                paramValues = mapGetParamValues,
+                paramTypes = mapGetParamTypes
+            )
+            bulkParamReaders.add(info)
+            paramMapReceiverClasses.addAll(instantiatedClasses)
+
+            DexDebugLog.log("[BulkParamReader] ${classDef.type}::${method.name}: " +
+                "uri=$reconstructedUri params=$mapGetKeys " +
+                "associated=${instantiatedClasses.size} classes")
+        }
+    }
+
+    /**
+     * After getScheme/getHost/getPath call at [callIndex], find the string constant
+     * it is compared against via equals/Objects.equals within the next few instructions.
+     */
+    private fun findEqualsComparisonTarget(
+        instructions: List<Instruction>,
+        callIndex: Int,
+        cfgStrings: Array<Map<Int, String>?>
+    ): String? {
+        // The result of getScheme/getHost/getPath goes into move-result-object
+        val resultReg = getMoveResultRegister(instructions, callIndex) ?: return null
+
+        // Scan forward for an equals comparison (up to 10 instructions)
+        val limit = minOf(instructions.size, callIndex + 12)
+        for (i in callIndex + 2 until limit) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+
+            val isInstanceEquals = (ref.name == "equals" || ref.name == "equalsIgnoreCase") &&
+                ref.parameterTypes.size == 1
+            // Objects.equals(Object, Object) — desugared as j$.util.Objects or java.util.Objects
+            val isStaticEquals = ref.name == "equals" &&
+                ref.parameterTypes.size == 2 &&
+                (ref.definingClass.endsWith("/Objects;") || ref.definingClass == "Ljava/util/Objects;")
+
+            if (!isInstanceEquals && !isStaticEquals) continue
+
+            val regStrings = cfgStrings[i] ?: continue
+
+            if (isStaticEquals) {
+                // invoke-static {a, b}, Objects.equals(Object, Object)Z
+                // Both registerC and registerD are arguments
+                if (instr.registerC == resultReg) {
+                    val compared = regStrings[instr.registerD]
+                    if (compared != null) return compared
+                } else if (instr.registerD == resultReg) {
+                    val compared = regStrings[instr.registerC]
+                    if (compared != null) return compared
+                }
+            } else {
+                // invoke-virtual {receiver, arg}, String.equals(Object)Z
+                // registerC is receiver, registerD is the argument
+                if (instr.registerC == resultReg) {
+                    val compared = regStrings[instr.registerD]
+                    if (compared != null) return compared
+                } else if (instr.registerD == resultReg) {
+                    val compared = regStrings[instr.registerC]
+                    if (compared != null) return compared
+                }
+            }
+        }
+        return null
+    }
+
     /** Maps register number → explicit parameter index (0-based, not counting `this`). */
     private fun buildParamRegisterMap(
         isStatic: Boolean,
@@ -197,10 +417,162 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
             val instructions = impl.instructions.toList()
             scanMethod(classDef, method, impl, instructions)
         }
+
+        // Cross-class Map.get() detection for param-map receiver classes
+        if (classDef.type in paramMapReceiverClasses) {
+            scanForMapGetKeys(classDef)
+        }
+    }
+
+    /**
+     * For each field in [fieldParamMap], find iget-object reads in [instructions] and
+     * forward-scan from each read to detect comparison values.
+     * Values found are associated back to the original Map.get() param key.
+     */
+    private fun scanFieldReadsForValues(
+        instructions: List<Instruction>,
+        cfgStrings: Array<Map<Int, String>?>,
+        fieldParamMap: Map<String, String>,
+        paramValues: MutableMap<String, MutableSet<String>>,
+        paramTypes: MutableMap<String, String>
+    ) {
+        if (fieldParamMap.isEmpty()) return
+        for ((i, instr) in instructions.withIndex()) {
+            if (instr.opcode != Opcode.IGET_OBJECT) continue
+            if (instr !is TwoRegisterInstruction || instr !is ReferenceInstruction) continue
+            val ref = instr.reference
+            if (ref !is FieldReference) continue
+            val fieldStr = "${ref.definingClass}->${ref.name}:${ref.type}"
+            val paramKey = fieldParamMap[fieldStr] ?: continue
+
+            val readReg = instr.registerA
+            val scan = ForwardValueScanner.scanStringValues(
+                instructions, i + 1, readReg, cfgStrings, window = 30
+            )
+            if (scan.values.isNotEmpty()) {
+                paramValues.getOrPut(paramKey) { mutableSetOf() }.addAll(scan.values)
+            }
+            if (scan.detectedType != null) {
+                paramTypes.putIfAbsent(paramKey, scan.detectedType)
+            }
+        }
+    }
+
+    /**
+     * Scan a param-map receiver class for Map.get("key") calls.
+     * These are classes instantiated by a bulk param reader method — the Map
+     * passed to their constructor holds collected URI query parameters.
+     */
+    private fun scanForMapGetKeys(classDef: DexBackedClassDef) {
+        val keys = mutableSetOf<String>()
+        val detectedParamValues = mutableMapOf<String, MutableSet<String>>()
+        val detectedParamTypes = mutableMapOf<String, String>()
+        for (method in classDef.methods) {
+            val impl = method.implementation ?: continue
+            val instructions = impl.instructions.toList()
+            if (instructions.isEmpty()) continue
+
+            val cfg = MethodCFG(instructions, impl.tryBlocks)
+            val cfgStrings = cfg.computeStringRegisters()
+
+            // Track field stores: param key → field reference string
+            val fieldParamMap = mutableMapOf<String, String>()
+
+            for ((i, instr) in instructions.withIndex()) {
+                if (instr !is ReferenceInstruction) continue
+                val ref = instr.reference
+                if (ref !is MethodReference) continue
+
+                // Match Map.get(Object) → Object
+                if (ref.name == "get" &&
+                    ref.parameterTypes.size == 1 &&
+                    ref.parameterTypes[0].toString() == "Ljava/lang/Object;" &&
+                    ref.returnType == "Ljava/lang/Object;" &&
+                    instr is Instruction35c
+                ) {
+                    val regStrings = cfgStrings[i] ?: continue
+                    val key = regStrings[instr.registerD]
+                    if (key != null && key.isNotBlank() && !key.contains("://") && key.length < 50) {
+                        keys.add(key)
+                        val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
+                        if (resultReg != null) {
+                            val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, window = 40)
+                            if (scan.detectedType != null) detectedParamTypes[key] = scan.detectedType
+                            if (scan.values.isNotEmpty()) detectedParamValues.getOrPut(key) { mutableSetOf() }.addAll(scan.values)
+                            if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
+                                val vals = detectedParamValues.getOrPut(key) { mutableSetOf() }
+                                vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                                vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                            }
+                            if (scan.storedToField != null) {
+                                fieldParamMap[scan.storedToField] = key
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Field tracking: find iget-object reads of stored fields → forward-scan for values
+            scanFieldReadsForValues(instructions, cfgStrings, fieldParamMap, detectedParamValues, detectedParamTypes)
+        }
+
+        if (keys.isEmpty()) return
+
+        // Add these keys to the bulk reader(s) that reference this class
+        for (reader in bulkParamReaders) {
+            if (classDef.type in reader.associatedClasses) {
+                reader.sameMethodParams.addAll(keys)
+                detectedParamTypes.forEach { (k, v) -> reader.paramTypes.putIfAbsent(k, v) }
+                detectedParamValues.forEach { (k, vals) ->
+                    reader.paramValues.getOrPut(k) { mutableSetOf() }.addAll(vals)
+                }
+                DexDebugLog.log("[BulkParamReader] Cross-class Map.get() in ${classDef.type}: " +
+                    "added keys=$keys types=$detectedParamTypes values=$detectedParamValues " +
+                    "to reader ${reader.sourceClass} uri=${reader.reconstructedUri}")
+            }
+        }
     }
 
     fun getResults(): List<ContentProviderInfo> {
+        // First, produce ContentProviderInfo entries from bulk param readers
+        for (reader in bulkParamReaders) {
+            if (reader.sameMethodParams.isEmpty()) continue
+            val uri = reader.reconstructedUri ?: continue
+
+            if (uri in seenUris) continue
+            seenUris.add(uri)
+
+            // Build queryParameterValues from detected values (real comparison constants only)
+            val paramValuesMap = mutableMapOf<String, List<String>>()
+            for (key in reader.sameMethodParams) {
+                val vals = reader.paramValues[key]
+                if (vals != null && vals.isNotEmpty()) {
+                    paramValuesMap[key] = vals.toList().sorted()
+                }
+            }
+
+            DexDebugLog.log("[BulkParamReader] Creating result: uri=$uri " +
+                "params=${reader.sameMethodParams} types=${reader.paramTypes} " +
+                "values=$paramValuesMap source=${reader.sourceClass}")
+
+            results.add(
+                ContentProviderInfo(
+                    authority = extractAuthority(uri),
+                    uriPattern = uri,
+                    matchCode = null,
+                    associatedColumns = emptyList(),
+                    queryParameters = reader.sameMethodParams.toList().sorted(),
+                    queryParameterValues = paramValuesMap,
+                    sourceClass = reader.sourceClass,
+                    sourceMethod = null
+                )
+            )
+        }
+
         return results.map { info ->
+            // Skip bulk-reader results that already have queryParameters set
+            if (info.queryParameters.isNotEmpty()) return@map info
+
             val params = mutableSetOf<String>()
             val paramValues = mutableMapOf<String, MutableSet<String>>()
             val defaults = mutableMapOf<String, String>()
@@ -472,7 +844,7 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         val values = if (isPlural) {
             scanForwardForListElementValues(instructions, callIndex + 2, resultReg, cfgStrings, classDef.type, paramName)
         } else {
-            scanForwardForStringValues(instructions, callIndex + 2, resultReg, regStrings, classDef.type, paramName)
+            scanForwardForStringValues(instructions, callIndex + 2, resultReg, cfgStrings).values
         }
 
         if (matchCodes.isNotEmpty()) {
@@ -643,99 +1015,18 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         }
     }
 
-    private fun getMoveResultRegister(instructions: List<Instruction>, callIndex: Int): Int? {
-        if (callIndex + 1 >= instructions.size) return null
-        val next = instructions[callIndex + 1]
-        if (next.opcode == Opcode.MOVE_RESULT || next.opcode == Opcode.MOVE_RESULT_OBJECT) {
-            return (next as? OneRegisterInstruction)?.registerA
-        }
-        return null
-    }
+    private fun getMoveResultRegister(instructions: List<Instruction>, callIndex: Int): Int? =
+        ForwardValueScanner.getMoveResultRegister(instructions, callIndex)
 
-    /**
-     * Scan forward from a getQueryParameter result for String.equals / TextUtils.equals
-     * comparisons, extracting the compared string constants.
-     *
-     * Uses a live copy of regStrings that gets updated during the forward scan:
-     * - const-string instructions add/update entries (register now holds a new string)
-     * - Non-const-string writes remove entries (register no longer holds a string)
-     * This gives long-distance tracking (values loaded far back in the method) with
-     * overwrite awareness (stale values are invalidated).
-     */
+    /** Delegates to [ForwardValueScanner.scanStringValues]. */
     private fun scanForwardForStringValues(
         instructions: List<Instruction>,
         startIndex: Int,
         resultReg: Int,
-        regStrings: Map<Int, String>,
-        sourceClass: String? = null,
-        paramName: String? = null
-    ): List<String> {
-        val values = mutableSetOf<String>()
-        val liveStrings = regStrings.toMutableMap()
-        val limit = minOf(instructions.size, startIndex + 30)
-
-        for (i in startIndex until limit) {
-            val instr = instructions[i]
-
-            // Update live register tracking: add const-strings, remove overwrites
-            trackStringRegistersLive(instr, liveStrings)
-
-            // Stop at method exits / throws — definitely a different context
-            if (instr.opcode in CONTROL_FLOW_STOPS) {
-                DexDebugLog.logFiltered(sourceClass, paramName,
-                    "[UriParam]   STOP control flow at +${i - startIndex} " +
-                    "by ${instr.opcode} — ending scan")
-                break
-            }
-
-            // Stop if resultReg is overwritten — any further equals() on this
-            // register is comparing a different value, not the query parameter.
-            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction && instr.registerA == resultReg) {
-                DexDebugLog.logFiltered(sourceClass, paramName,
-                    "[UriParam]   STOP v$resultReg overwritten at +${i - startIndex} " +
-                    "by ${instr.opcode} — ending scan")
-                break
-            }
-
-            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
-            val ref = instr.reference
-            if (ref !is MethodReference) continue
-
-            when {
-                ref.definingClass == "Ljava/lang/String;" &&
-                        (ref.name == "equals" || ref.name == "equalsIgnoreCase") -> {
-                    if (instr.registerC == resultReg) {
-                        val matched = liveStrings[instr.registerD]
-                        DexDebugLog.logFiltered(sourceClass, paramName,
-                            "[UriParam]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=resultReg, " +
-                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    } else if (instr.registerD == resultReg) {
-                        val matched = liveStrings[instr.registerC]
-                        DexDebugLog.logFiltered(sourceClass, paramName,
-                            "[UriParam]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=${matched ?: "??"}, " +
-                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    }
-                }
-                ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals" -> {
-                    if (instr.registerC == resultReg) {
-                        val matched = liveStrings[instr.registerD]
-                        DexDebugLog.logFiltered(sourceClass, paramName,
-                            "[UriParam]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=resultReg, " +
-                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    } else if (instr.registerD == resultReg) {
-                        val matched = liveStrings[instr.registerC]
-                        DexDebugLog.logFiltered(sourceClass, paramName,
-                            "[UriParam]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=${matched ?: "??"}, " +
-                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    }
-                }
-            }
-        }
-        return values.toList()
+        cfgStrings: Array<Map<Int, String>?>,
+        window: Int = 30
+    ): ForwardValueScanner.ValueScanResult {
+        return ForwardValueScanner.scanStringValues(instructions, startIndex, resultReg, cfgStrings, window)
     }
 
     /**
@@ -821,27 +1112,6 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         }
 
         return values.toList()
-    }
-
-    /**
-     * Update live register tracking during forward scan:
-     * const-string adds entries, any other register-writing opcode invalidates.
-     * Uses dexlib2's Opcode.setsRegister() flag for complete coverage.
-     */
-    private fun trackStringRegistersLive(instr: Instruction, liveStrings: MutableMap<Int, String>) {
-        val op = instr.opcode
-        if (op == Opcode.CONST_STRING || op == Opcode.CONST_STRING_JUMBO) {
-            if (instr is OneRegisterInstruction && instr is ReferenceInstruction) {
-                val ref = instr.reference
-                if (ref is StringReference) {
-                    liveStrings[instr.registerA] = ref.string
-                    return
-                }
-            }
-        }
-        if (op.setsRegister() && instr is OneRegisterInstruction) {
-            liveStrings.remove(instr.registerA)
-        }
     }
 
     // --- Match code dispatch detection (CFG-based) ---
@@ -1035,16 +1305,6 @@ class UriPatternExtractor(private val manifestAnalysis: ManifestAnalysis) {
         return uri.split('/').joinToString("/") { segment ->
             if (segment == "#" || segment == "*") "?" else segment
         }
-    }
-
-    companion object {
-        /** Opcodes that definitely end execution in this path. Do NOT include goto —
-         *  compiler-generated hashCode switches interleave goto (success jump) with
-         *  the next equals() check in the linear stream. */
-        private val CONTROL_FLOW_STOPS = setOf(
-            Opcode.RETURN_VOID, Opcode.RETURN, Opcode.RETURN_OBJECT, Opcode.RETURN_WIDE,
-            Opcode.THROW
-        )
     }
 
     private fun extractAuthority(uri: String): String? {

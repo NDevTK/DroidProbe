@@ -1,12 +1,9 @@
 package com.droidprobe.app.analysis.dex
 
-import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedMethod
 import com.android.tools.smali.dexlib2.iface.MethodImplementation
 import com.android.tools.smali.dexlib2.iface.instruction.Instruction
-import com.android.tools.smali.dexlib2.iface.instruction.NarrowLiteralInstruction
-import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
@@ -29,7 +26,8 @@ import com.droidprobe.app.data.model.IntentInfo
  */
 class IntentExtraExtractor(
     private val classHierarchy: Map<String, String>,
-    private val componentClasses: Set<String>
+    private val componentClasses: Set<String>,
+    private val classIndex: Map<String, DexBackedClassDef> = emptyMap()
 ) {
 
     private val results = mutableListOf<IntentInfo>()
@@ -236,7 +234,7 @@ class IntentExtraExtractor(
 
         // Scan forward for value comparisons on the result register
         val values = mutableListOf<String>()
-        val resultReg = getMoveResultRegister(instructions, callIndex)
+        val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, callIndex)
 
         DexDebugLog.logFiltered(classDef.type, key,
             "[IntentExtra] ${ref.name}(\"$key\") type=$type at index=$callIndex " +
@@ -245,9 +243,16 @@ class IntentExtraExtractor(
 
         if (resultReg != null) {
             if (ref.name in stringResultTypes) {
-                values.addAll(scanForwardForStringValues(instructions, callIndex + 2, resultReg, cfgStrings, classDef.type, key))
+                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, window = 25)
+                values.addAll(scan.values)
+                // Chain: if parseInt detected on string result, scan for int values + enum
+                if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
+                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                }
             } else if (ref.name in intResultTypes) {
-                values.addAll(scanForwardForIntValues(instructions, callIndex + 2, resultReg, classDef.type, key))
+                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
+                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg))
             }
         }
 
@@ -275,8 +280,8 @@ class IntentExtraExtractor(
         // Pattern A: resolve the value register (registerE) for string/int literals
         val value = when (type) {
             "String" -> regState[instr.registerE]
-            "Int", "Short", "Byte" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
-            "Boolean" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
+            "Int", "Short", "Byte" -> ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            "Boolean" -> ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
                 if (it == 0) "false" else "true"
             }
             else -> null
@@ -298,12 +303,18 @@ class IntentExtraExtractor(
         val key = cfgStrings[callIndex]?.get(instr.registerD) ?: return
 
         val values = mutableListOf<String>()
-        val resultReg = getMoveResultRegister(instructions, callIndex)
+        val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, callIndex)
         if (resultReg != null) {
             if (type == "String") {
-                values.addAll(scanForwardForStringValues(instructions, callIndex + 2, resultReg, cfgStrings))
+                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, window = 25)
+                values.addAll(scan.values)
+                if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
+                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                }
             } else if (type in listOf("Int", "Short", "Byte")) {
-                values.addAll(scanForwardForIntValues(instructions, callIndex + 2, resultReg))
+                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
+                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg))
             }
         }
 
@@ -325,8 +336,8 @@ class IntentExtraExtractor(
 
         val value = when (type) {
             "String" -> regState[instr.registerE]
-            "Int", "Short", "Byte" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
-            "Boolean" -> resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
+            "Int", "Short", "Byte" -> ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            "Boolean" -> ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
                 if (it == 0) "false" else "true"
             }
             else -> null
@@ -343,174 +354,7 @@ class IntentExtraExtractor(
         }
     }
 
-    // --- Forward scanning for values ---
-
-    /**
-     * After a getStringExtra/getSerializableExtra call, scan forward for:
-     * - String.equals(resultReg, constString) / String.equalsIgnoreCase(...)
-     * - TextUtils.equals(resultReg, constString) or (constString, resultReg)
-     * Uses CFG-computed string registers at each equals() call site for accuracy.
-     * Stops scanning once the result register is overwritten by any instruction.
-     */
-    private fun scanForwardForStringValues(
-        instructions: List<Instruction>,
-        startIndex: Int,
-        resultReg: Int,
-        cfgStrings: Array<Map<Int, String>?>,
-        sourceClass: String? = null,
-        extraKey: String? = null
-    ): List<String> {
-        val values = mutableSetOf<String>()
-        val limit = minOf(instructions.size, startIndex + 25)
-
-        for (i in startIndex until limit) {
-            val instr = instructions[i]
-
-            // Stop at method exits / throws
-            if (instr.opcode in CONTROL_FLOW_STOPS) {
-                DexDebugLog.logFiltered(sourceClass, extraKey,
-                    "[IntentExtra]   STOP control flow at +${i - startIndex} " +
-                    "by ${instr.opcode} — ending scan")
-                break
-            }
-
-            // Stop if resultReg is overwritten
-            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction && instr.registerA == resultReg) {
-                DexDebugLog.logFiltered(sourceClass, extraKey,
-                    "[IntentExtra]   STOP v$resultReg overwritten at +${i - startIndex} " +
-                    "by ${instr.opcode} — ending scan")
-                break
-            }
-
-            if (instr !is ReferenceInstruction) continue
-            val ref = instr.reference
-            if (ref !is MethodReference) continue
-            if (instr !is Instruction35c) continue
-
-            val regState = cfgStrings[i] ?: continue
-
-            when {
-                ref.definingClass == "Ljava/lang/String;" &&
-                        (ref.name == "equals" || ref.name == "equalsIgnoreCase") -> {
-                    if (instr.registerC == resultReg) {
-                        val matched = regState[instr.registerD]
-                        DexDebugLog.logFiltered(sourceClass, extraKey,
-                            "[IntentExtra]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=resultReg, " +
-                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    } else if (instr.registerD == resultReg) {
-                        val matched = regState[instr.registerC]
-                        DexDebugLog.logFiltered(sourceClass, extraKey,
-                            "[IntentExtra]   +${i - startIndex}: String.${ref.name}(v${instr.registerC}=${matched ?: "??"}, " +
-                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    }
-                }
-                ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals" -> {
-                    if (instr.registerC == resultReg) {
-                        val matched = regState[instr.registerD]
-                        DexDebugLog.logFiltered(sourceClass, extraKey,
-                            "[IntentExtra]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=resultReg, " +
-                            "v${instr.registerD}=${matched ?: "??"}) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    } else if (instr.registerD == resultReg) {
-                        val matched = regState[instr.registerC]
-                        DexDebugLog.logFiltered(sourceClass, extraKey,
-                            "[IntentExtra]   +${i - startIndex}: TextUtils.equals(v${instr.registerC}=${matched ?: "??"}, " +
-                            "v${instr.registerD}=resultReg) → ${if (matched != null) "HIT" else "miss"}")
-                        matched?.let { values.add(it) }
-                    }
-                }
-            }
-        }
-        return values.toList()
-    }
-
-    /**
-     * After a getIntExtra call, scan forward for packed-switch or sparse-switch
-     * on the result register.
-     */
-    private fun scanForwardForIntValues(
-        instructions: List<Instruction>,
-        startIndex: Int,
-        resultReg: Int,
-        sourceClass: String? = null,
-        extraKey: String? = null
-    ): List<String> {
-        val values = mutableSetOf<String>()
-        val limit = minOf(instructions.size, startIndex + 20)
-
-        for (i in startIndex until limit) {
-            val instr = instructions[i]
-
-            // packed-switch or sparse-switch on the result register
-            if (instr.opcode == Opcode.PACKED_SWITCH || instr.opcode == Opcode.SPARSE_SWITCH) {
-                if (instr is OneRegisterInstruction && instr.registerA == resultReg) {
-                    // Find the switch payload
-                    val payload = findSwitchPayload(instructions, i)
-                    if (payload != null) {
-                        values.addAll(payload.map { it.toString() })
-                    }
-                    break
-                }
-            }
-
-            // Also catch if-eq / if-ne comparisons with constants
-            if (instr.opcode == Opcode.IF_EQ || instr.opcode == Opcode.IF_NE) {
-                // These are TwoRegisterInstruction with registerA and registerB
-                // One register is resultReg, the other holds a const
-                if (instr is com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction) {
-                    val otherReg = when {
-                        instr.registerA == resultReg -> instr.registerB
-                        instr.registerB == resultReg -> instr.registerA
-                        else -> continue
-                    }
-                    resolveIntFromRegister(instructions, i, otherReg)?.let {
-                        values.add(it.toString())
-                    }
-                }
-            }
-        }
-        return values.toList()
-    }
-
-    /**
-     * Find switch payload values for a packed-switch or sparse-switch instruction.
-     */
-    private fun findSwitchPayload(instructions: List<Instruction>, switchIndex: Int): List<Int>? {
-        // The switch instruction references a payload at an offset
-        // In dexlib2, we need to scan for the payload instruction
-        for (j in switchIndex + 1 until instructions.size) {
-            val payload = instructions[j]
-            when (payload) {
-                is com.android.tools.smali.dexlib2.iface.instruction.formats.PackedSwitchPayload -> {
-                    val elements = payload.switchElements
-                    return elements.map { it.key }
-                }
-                is com.android.tools.smali.dexlib2.iface.instruction.formats.SparseSwitchPayload -> {
-                    val elements = payload.switchElements
-                    return elements.map { it.key }
-                }
-            }
-        }
-        return null
-    }
-
     // --- Helpers ---
-
-    /**
-     * Get the register where move-result / move-result-object stores the return value.
-     */
-    private fun getMoveResultRegister(instructions: List<Instruction>, callIndex: Int): Int? {
-        if (callIndex + 1 >= instructions.size) return null
-        val next = instructions[callIndex + 1]
-        if (next.opcode == Opcode.MOVE_RESULT || next.opcode == Opcode.MOVE_RESULT_OBJECT ||
-            next.opcode == Opcode.MOVE_RESULT_WIDE
-        ) {
-            return (next as? OneRegisterInstruction)?.registerA
-        }
-        return null
-    }
 
     private fun inferTypeFromBundleMethodName(methodName: String, prefix: String): String {
         val suffix = methodName.removePrefix(prefix)
@@ -527,34 +371,6 @@ class IntentExtraExtractor(
             suffix.contains("Array") -> "${suffix.replace("Array", "")}[]"
             else -> suffix.ifEmpty { "Unknown" }
         }
-    }
-
-    private fun resolveIntFromRegister(
-        instructions: List<Instruction>,
-        callIndex: Int,
-        register: Int
-    ): Int? {
-        for (j in callIndex - 1 downTo maxOf(0, callIndex - 30)) {
-            val prev = instructions[j]
-            if (prev.opcode in listOf(Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16)) {
-                if (prev is OneRegisterInstruction && prev.registerA == register &&
-                    prev is NarrowLiteralInstruction
-                ) {
-                    return prev.narrowLiteral
-                }
-            }
-        }
-        return null
-    }
-
-    companion object {
-        /** Opcodes that definitely end execution in this path. Do NOT include goto —
-         *  compiler-generated hashCode switches interleave goto (success jump) with
-         *  the next equals() check in the linear stream. */
-        private val CONTROL_FLOW_STOPS = setOf(
-            Opcode.RETURN_VOID, Opcode.RETURN, Opcode.RETURN_OBJECT, Opcode.RETURN_WIDE,
-            Opcode.THROW
-        )
     }
 
     private fun addResult(

@@ -1,6 +1,7 @@
 package com.droidprobe.app.analysis.dex
 
 import com.android.tools.smali.dexlib2.Opcodes
+import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import com.droidprobe.app.data.model.DexAnalysis
 import com.droidprobe.app.data.model.ManifestAnalysis
@@ -26,16 +27,17 @@ class DexAnalyzer {
     ): DexAnalysis = withContext(Dispatchers.Default) {
         val dexFiles = loadDexFiles(apkPath)
         val stringCollector = StringConstantCollector()
-        val uriExtractor = UriPatternExtractor(manifestAnalysis)
         val fileProviderExtractor = FileProviderExtractor(manifestAnalysis)
 
         // Also extract FileProvider XML configs from the APK
         fileProviderExtractor.processApkResources(apkPath)
 
-        // --- Pass 1: Build class hierarchy from all DEX classes ---
+        // --- Pass 1: Build class hierarchy and class index from all DEX classes ---
         val classHierarchy = mutableMapOf<String, String>() // class -> superclass
+        val classIndex = mutableMapOf<String, DexBackedClassDef>() // class -> class def
         for (dexFile in dexFiles) {
             for (classDef in dexFile.classes) {
+                classIndex[classDef.type] = classDef
                 val superclass = classDef.superclass
                 if (superclass != null) {
                     classHierarchy[classDef.type] = superclass
@@ -56,23 +58,26 @@ class DexAnalyzer {
         addComponents(manifestAnalysis.services)
         addComponents(manifestAnalysis.receivers)
 
-        val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses)
+        val uriExtractor = UriPatternExtractor(manifestAnalysis, classIndex)
+        val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses, classIndex)
         val callExtractor = ContentProviderCallExtractor()
 
         // --- Pass 1.5: Pre-scan for URI parameter wrapper methods ---
         // Detects methods that internally call getQueryParameter/getBooleanQueryParameter
         // with a parameter-sourced key, enabling inter-procedural param detection.
+        // Also detects bulk param readers: getQueryParameterNames() → Map → Map.get("key")
         for (dexFile in dexFiles) {
             for (classDef in dexFile.classes) {
                 if (isFrameworkClass(classDef.type)) continue
                 uriExtractor.preScanForWrappers(classDef)
+                uriExtractor.preScanForBulkParamReaders(classDef)
             }
         }
 
         // --- Pass 2: Extract data from all classes ---
         for ((dexIndex, dexFile) in dexFiles.withIndex()) {
             val classes = dexFile.classes.toList()
-            for ((classIndex, classDef) in classes.withIndex()) {
+            for ((classIdx, classDef) in classes.withIndex()) {
                 // Skip framework classes for performance
                 val className = classDef.type
                 if (isFrameworkClass(className)) continue
@@ -81,14 +86,14 @@ class DexAnalyzer {
                     ProgressUpdate(
                         currentDex = dexIndex + 1,
                         totalDex = dexFiles.size,
-                        currentClass = classIndex + 1,
+                        currentClass = classIdx + 1,
                         totalClasses = classes.size,
                         message = "DEX ${dexIndex + 1}/${dexFiles.size}: ${className.substringAfterLast('/')}"
                     )
                 )
 
                 DexDebugLog.logVerbose(className,
-                    "[DexAnalyzer] Processing class $className (dex ${dexIndex + 1}, class ${classIndex + 1}/${classes.size})")
+                    "[DexAnalyzer] Processing class $className (dex ${dexIndex + 1}, class ${classIdx + 1}/${classes.size})")
 
                 stringCollector.process(classDef)
                 uriExtractor.process(classDef)

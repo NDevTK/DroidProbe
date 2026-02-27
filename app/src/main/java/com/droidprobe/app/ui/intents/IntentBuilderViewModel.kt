@@ -142,12 +142,41 @@ class IntentBuilderViewModel(
                             }
                         }
 
+                        // Build candidate deep link URIs from browsable intent filters
+                        // for URI-based matching (e.g. "https://www.google.com/hsi")
+                        val isBrowsable = allCategories.contains("android.intent.category.BROWSABLE")
+                        val filterDeepLinkUris = mutableSetOf<String>()
+                        if (isBrowsable) {
+                            for (filter in comp.intentFilters) {
+                                for (scheme in filter.dataSchemes) {
+                                    for (host in filter.dataAuthorities) {
+                                        if (filter.dataPaths.isNotEmpty()) {
+                                            for (path in filter.dataPaths) {
+                                                filterDeepLinkUris.add("$scheme://$host$path")
+                                            }
+                                        } else {
+                                            filterDeepLinkUris.add("$scheme://$host")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         val compDataUris = mutableListOf<String>()
                         val perUriParams = mutableMapOf<String, List<String>>()
                         val perUriParamValues = mutableMapOf<String, Map<String, List<String>>>()
                         val perUriParamDefaults = mutableMapOf<String, Map<String, String>>()
                         for (pattern in deepLinkPatterns) {
-                            if (pattern.sourceClass != compSmali) continue
+                            // Match by sourceClass (existing behavior)
+                            val matchesByClass = pattern.sourceClass == compSmali
+                            // Match by URI against browsable intent filter data
+                            val matchesByUri = isBrowsable && filterDeepLinkUris.any { filterUri ->
+                                pattern.uriPattern == filterUri ||
+                                    pattern.uriPattern.startsWith("$filterUri?") ||
+                                    pattern.uriPattern.startsWith("$filterUri/")
+                            }
+                            if (!matchesByClass && !matchesByUri) continue
+
                             val fullUri: String
                             val uri = pattern.uriPattern
                             if (uri.contains("://")) {
