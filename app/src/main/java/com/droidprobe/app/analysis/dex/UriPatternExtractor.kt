@@ -646,7 +646,7 @@ class UriPatternExtractor(
                         val regStrings = cfgStrings[i] ?: continue
                         val uri = regStrings[instr.registerC]
                         if (uri != null && uri.contains("://")) {
-                            addResult(uri, null, classDef, "<clinit>")
+                            addResultWithInlineParams(uri, classDef, "<clinit>")
                         }
                     }
                 }
@@ -672,6 +672,11 @@ class UriPatternExtractor(
 
         val regInts = mutableMapOf<Int, Int>()
 
+        // Strategy 7: Deep link URI detection from manual getScheme/getHost/getPath validation
+        val deepLinkSchemes = mutableSetOf<String>()
+        val deepLinkHosts = mutableSetOf<String>()
+        val deepLinkPaths = mutableSetOf<String>()
+
         for ((i, instr) in instructions.withIndex()) {
             trackIntRegisters(instr, regInts)
 
@@ -689,6 +694,21 @@ class UriPatternExtractor(
                 isGetQueryParameter(ref) -> handleGetQueryParameter(ref, regStrings, instr, instructions, i, classDef, cfgStrings, matchDispatch)
                 isGetBooleanQueryParameter(ref) -> handleGetBooleanQueryParameter(regStrings, regInts, instr, i, classDef, matchDispatch)
                 else -> handleWrapperCallSite(ref, regStrings, regInts, instr, i, classDef, matchDispatch)
+            }
+
+            // Detect Uri.getPath/getHost/getScheme → equals comparisons for deep link URIs
+            if (ref.definingClass == "Landroid/net/Uri;" &&
+                ref.name in DEEP_LINK_COMPONENT_METHODS && ref.parameterTypes.isEmpty()
+            ) {
+                val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
+                if (resultReg != null) {
+                    val values = collectDeepLinkComponentValues(instructions, i + 2, resultReg, cfgStrings)
+                    when (ref.name) {
+                        "getPath" -> deepLinkPaths.addAll(values)
+                        "getHost" -> deepLinkHosts.addAll(values)
+                        "getScheme" -> deepLinkSchemes.addAll(values)
+                    }
+                }
             }
 
             // Inter-procedural: track classes instantiated under specific match codes.
@@ -711,6 +731,18 @@ class UriPatternExtractor(
                 }
             }
         }
+
+        // Construct deep link URIs from detected scheme/host/path validation
+        if (deepLinkHosts.isNotEmpty() && deepLinkPaths.isNotEmpty()) {
+            val scheme = deepLinkSchemes.firstOrNull() ?: "https"
+            for (host in deepLinkHosts) {
+                if (!host.contains('.')) continue
+                for (path in deepLinkPaths) {
+                    if (!path.startsWith('/')) continue
+                    addResult("$scheme://$host$path", null, classDef, method.name)
+                }
+            }
+        }
     }
 
     /**
@@ -722,6 +754,46 @@ class UriPatternExtractor(
                 regInts[instr.registerA] = instr.narrowLiteral
             }
         }
+    }
+
+    // --- Strategy 7: Deep link URI from manual scheme/host/path validation ---
+
+    private val DEEP_LINK_COMPONENT_METHODS = setOf("getPath", "getHost", "getScheme")
+
+    /**
+     * Forward-scan for string comparisons on a URI component result register.
+     * Returns raw compared values (e.g., "/gasearch", "www.google.com", "https").
+     */
+    private fun collectDeepLinkComponentValues(
+        instructions: List<Instruction>,
+        startIndex: Int,
+        componentReg: Int,
+        cfgStrings: Array<Map<Int, String>?>
+    ): List<String> {
+        val values = mutableListOf<String>()
+        val limit = minOf(instructions.size, startIndex + 20)
+        for (i in startIndex until limit) {
+            val instr = instructions[i]
+            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+            val regStrings = cfgStrings[i] ?: continue
+
+            val isEquals = (ref.definingClass == "Ljava/lang/String;" &&
+                    (ref.name == "equals" || ref.name == "equalsIgnoreCase")) ||
+                    (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") ||
+                    (ref.name == "equals" && ref.parameterTypes.size == 2 &&
+                            ref.definingClass.endsWith("/Objects;"))
+            if (!isEquals) continue
+
+            val value = when {
+                instr.registerC == componentReg -> regStrings[instr.registerD]
+                instr.registerD == componentReg -> regStrings[instr.registerC]
+                else -> null
+            }
+            if (value != null) values.add(value)
+        }
+        return values
     }
 
     // --- Strategy 1: UriMatcher.addURI ---
@@ -777,7 +849,28 @@ class UriPatternExtractor(
         if (instr !is Instruction35c) return
         val uri = regStrings[instr.registerC]
         if (uri != null && uri.contains("://")) {
-            addResult(uri, null, classDef, method.name)
+            addResultWithInlineParams(uri, classDef, method.name)
+        }
+    }
+
+    /** Add a URI result, extracting inline query params from the URL if present. */
+    private fun addResultWithInlineParams(
+        uri: String,
+        classDef: DexBackedClassDef,
+        methodName: String
+    ) {
+        val parsed = parseUrlQueryParams(uri)
+        if (parsed != null) {
+            val (baseUrl, paramMap) = parsed
+            addResult(
+                baseUrl, null, classDef, methodName,
+                queryParameters = paramMap.keys.toList().sorted(),
+                queryParameterValues = paramMap
+                    .filter { it.value.any { v -> v.isNotEmpty() } }
+                    .mapValues { (_, values) -> values.filter { it.isNotEmpty() }.sorted() }
+            )
+        } else {
+            addResult(uri, null, classDef, methodName)
         }
     }
 
@@ -1267,7 +1360,9 @@ class UriPatternExtractor(
         uri: String,
         matchCode: Int?,
         classDef: DexBackedClassDef,
-        methodName: String
+        methodName: String,
+        queryParameters: List<String> = emptyList(),
+        queryParameterValues: Map<String, List<String>> = emptyMap()
     ) {
         // Exact string dedup
         if (uri in seenUris) return
@@ -1286,7 +1381,8 @@ class UriPatternExtractor(
 
         DexDebugLog.logFiltered(classDef.type, null,
             "[UriPattern] Found URI \"$uri\" matchCode=$matchCode " +
-            "class=${classDef.type} method=$methodName")
+            "class=${classDef.type} method=$methodName" +
+            if (queryParameters.isNotEmpty()) " inlineParams=$queryParameters" else "")
 
         results.add(
             ContentProviderInfo(
@@ -1294,6 +1390,8 @@ class UriPatternExtractor(
                 uriPattern = uri,
                 matchCode = matchCode,
                 associatedColumns = emptyList(),
+                queryParameters = queryParameters,
+                queryParameterValues = queryParameterValues,
                 sourceClass = classDef.type,
                 sourceMethod = methodName
             )
@@ -1316,4 +1414,36 @@ class UriPatternExtractor(
         // No scheme — authority/path format from UriMatcher
         return uri.substringBefore('/')
     }
+
+    /**
+     * Parse query parameters from a URL string containing '?key=value&key2=value2'.
+     * Returns (baseUrl, paramMap) or null if no query string present.
+     */
+    private fun parseUrlQueryParams(url: String): Pair<String, Map<String, List<String>>>? {
+        val urlNoFragment = url.substringBefore('#')
+        val queryIndex = urlNoFragment.indexOf('?')
+        if (queryIndex < 0) return null
+
+        val baseUrl = urlNoFragment.substring(0, queryIndex)
+        val queryString = urlNoFragment.substring(queryIndex + 1)
+        if (queryString.isBlank()) return null
+
+        val params = mutableMapOf<String, MutableList<String>>()
+        for (pair in queryString.split('&')) {
+            val eqIdx = pair.indexOf('=')
+            if (eqIdx > 0) {
+                val key = decodeUrlComponent(pair.substring(0, eqIdx))
+                val value = decodeUrlComponent(pair.substring(eqIdx + 1))
+                params.getOrPut(key) { mutableListOf() }.add(value)
+            } else if (pair.isNotBlank()) {
+                params.getOrPut(decodeUrlComponent(pair)) { mutableListOf() }
+            }
+        }
+
+        return if (params.isNotEmpty()) baseUrl to params.mapValues { it.value.toList() } else null
+    }
+
+    private fun decodeUrlComponent(s: String): String = try {
+        java.net.URLDecoder.decode(s, "UTF-8")
+    } catch (_: Exception) { s }
 }

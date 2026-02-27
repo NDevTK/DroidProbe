@@ -456,7 +456,7 @@ private fun TargetCard(
                         queryParams.forEachIndexed { index, param ->
                             val label = when {
                                 param.defaultValue != null -> "${param.key} (default: ${param.defaultValue})"
-                                else -> "${param.key} *"
+                                else -> param.key
                             }
                             SuggestableTextField(
                                 value = param.value,

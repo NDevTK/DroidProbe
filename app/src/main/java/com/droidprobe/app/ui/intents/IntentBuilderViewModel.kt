@@ -201,6 +201,65 @@ class IntentBuilderViewModel(
                             }
                         }
 
+                        // Producer URL scanning: extract query params from URL string
+                        // constants matching this component's browsable intent filters.
+                        // Catches params from producer code (e.g. classes that build deep
+                        // link URLs) even when the consumer doesn't call getQueryParameter().
+                        if (isBrowsable && filterDeepLinkUris.isNotEmpty()) {
+                            val producerUrls = (dex?.allUrlStrings ?: emptyList()) +
+                                (dex?.deepLinkUriStrings ?: emptyList())
+                            for (urlStr in producerUrls) {
+                                val urlNoFragment = urlStr.substringBefore('#')
+                                val queryIdx = urlNoFragment.indexOf('?')
+                                if (queryIdx < 0) continue
+
+                                val baseUrl = urlNoFragment.substring(0, queryIdx)
+                                val matchesFilter = filterDeepLinkUris.any { filterUri ->
+                                    baseUrl == filterUri || baseUrl.startsWith("$filterUri/")
+                                }
+                                if (!matchesFilter) continue
+
+                                val queryString = urlNoFragment.substring(queryIdx + 1)
+                                if (queryString.isBlank()) continue
+
+                                val parsedParams = mutableMapOf<String, MutableList<String>>()
+                                for (pair in queryString.split('&')) {
+                                    val eqIdx = pair.indexOf('=')
+                                    if (eqIdx > 0) {
+                                        val key = pair.substring(0, eqIdx)
+                                        val value = pair.substring(eqIdx + 1)
+                                        parsedParams.getOrPut(key) { mutableListOf() }.add(value)
+                                    } else if (pair.isNotBlank()) {
+                                        parsedParams.getOrPut(pair) { mutableListOf() }
+                                    }
+                                }
+                                if (parsedParams.isEmpty()) continue
+
+                                if (baseUrl !in compDataUris) {
+                                    compDataUris.add(baseUrl)
+                                }
+
+                                // Merge params into per-URI maps
+                                val existingParams = perUriParams[baseUrl]?.toMutableSet() ?: mutableSetOf()
+                                existingParams.addAll(parsedParams.keys)
+                                perUriParams[baseUrl] = existingParams.toList().sorted()
+
+                                val existingValues = perUriParamValues[baseUrl]
+                                    ?.mapValues { (_, v) -> v.toMutableSet() }?.toMutableMap()
+                                    ?: mutableMapOf()
+                                for ((key, values) in parsedParams) {
+                                    val set = existingValues.getOrPut(key) { mutableSetOf() }
+                                    set.addAll(values.filter { it.isNotEmpty() })
+                                }
+                                val mergedValues = existingValues
+                                    .filter { it.value.isNotEmpty() }
+                                    .mapValues { (_, v) -> v.toList().sorted() }
+                                if (mergedValues.isNotEmpty()) {
+                                    perUriParamValues[baseUrl] = mergedValues
+                                }
+                            }
+                        }
+
                         targets.add(
                             LaunchableTarget(
                                 component = comp,
