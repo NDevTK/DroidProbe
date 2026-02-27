@@ -190,6 +190,85 @@ class DexAnalyzer {
             }
         }
 
+        // --- Post-process fallback: Host-based orphan matching ---
+        // For gateway/DI patterns where BFS can't trace the class reference chain
+        // (e.g. LensDeeplink → GoogleAppGatewayActivity → dynamic dispatch → bxrh),
+        // match orphaned params to components by comparing validated URI hosts.
+        if (orphanedParams.isNotEmpty()) {
+            val validatedHosts = uriExtractor.getValidatedHostsByClass()
+            for (comp in manifestAnalysis.activities) {
+                if (!comp.isExported) continue
+
+                val compSmali = "L${comp.name.replace('.', '/')};"
+                val scanSmali = if (comp.targetActivity != null) {
+                    "L${comp.targetActivity.replace('.', '/')};"
+                } else {
+                    compSmali
+                }
+
+                // Skip if this component already has URI results with params
+                val alreadyHasParams = uriResults.any {
+                    (it.sourceClass == compSmali || it.sourceClass == scanSmali) &&
+                        it.queryParameters.isNotEmpty()
+                }
+                if (alreadyHasParams) continue
+
+                // Collect all hosts from the component's intent filters
+                val filterHosts = comp.intentFilters
+                    .flatMap { it.dataAuthorities }
+                    .map { it.substringBefore(':') } // strip port
+                    .toSet()
+                if (filterHosts.isEmpty()) continue
+
+                // Find orphaned classes whose validated hosts match
+                val params = mutableSetOf<String>()
+                val paramValues = mutableMapOf<String, MutableSet<String>>()
+                val paramDefaults = mutableMapOf<String, String>()
+                for ((cls, orphaned) in orphanedParams) {
+                    val classHosts = validatedHosts[cls] ?: continue
+                    if (classHosts.intersect(filterHosts).isEmpty()) continue
+
+                    params.addAll(orphaned.params)
+                    orphaned.values.forEach { (k, v) ->
+                        paramValues.getOrPut(k) { mutableSetOf() }.addAll(v)
+                    }
+                    paramDefaults.putAll(orphaned.defaults)
+                }
+                if (params.isEmpty()) continue
+
+                DexDebugLog.log("[DexAnalyzer] Host-based param propagation: " +
+                    "${comp.name} ← ${params.size} params (hosts: $filterHosts)")
+
+                // Build URIs from intent filter data
+                for (filter in comp.intentFilters) {
+                    for (scheme in filter.dataSchemes) {
+                        for (host in filter.dataAuthorities) {
+                            val paths = filter.dataPaths.ifEmpty { listOf("") }
+                            for (path in paths) {
+                                val uri = if (path.isNotEmpty()) "$scheme://$host$path"
+                                    else "$scheme://$host"
+                                uriResults.add(
+                                    ContentProviderInfo(
+                                        authority = host,
+                                        uriPattern = uri,
+                                        matchCode = null,
+                                        associatedColumns = emptyList(),
+                                        queryParameters = params.sorted().toList(),
+                                        queryParameterValues = paramValues
+                                            .filter { it.value.isNotEmpty() }
+                                            .mapValues { (_, v) -> v.sorted().toList() },
+                                        queryParameterDefaults = paramDefaults,
+                                        sourceClass = compSmali,
+                                        sourceMethod = null
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         DexDebugLog.log("[DexAnalyzer] Analysis complete: " +
             "${uriResults.size} URIs, ${resolvedExtras.size} extras, " +
             "${fileProviderExtractor.getResults().size} fileProvider paths")

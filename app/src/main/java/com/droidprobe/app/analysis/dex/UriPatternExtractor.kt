@@ -68,6 +68,9 @@ class UriPatternExtractor(
     private val queryParamDefaultsByMatchCode = mutableMapOf<Int, MutableMap<String, String>>()
     private val queryParamDefaultsByClass = mutableMapOf<String, MutableMap<String, String>>()
 
+    // Hosts validated via getHost() + equals("host") — used for host-based orphan matching
+    private val validatedHostsByClass = mutableMapOf<String, MutableSet<String>>()
+
     /**
      * Strategy 6: Bulk param reader detection.
      * Methods that call Uri.getQueryParameterNames() and then read individual params
@@ -642,6 +645,8 @@ class UriPatternExtractor(
             }
     }
 
+    fun getValidatedHostsByClass(): Map<String, Set<String>> = validatedHostsByClass
+
     private fun checkStaticFields(classDef: DexBackedClassDef) {
         for (field in classDef.staticFields) {
             if ((field.name.endsWith("URI") || field.name.endsWith("_URI") || field.name == "CONTENT_URI") &&
@@ -732,7 +737,10 @@ class UriPatternExtractor(
                     val values = collectDeepLinkComponentValues(instructions, i + 2, resultReg, cfgStrings)
                     when (ref.name) {
                         "getPath" -> deepLinkPaths.addAll(values)
-                        "getHost" -> deepLinkHosts.addAll(values)
+                        "getHost" -> {
+                            deepLinkHosts.addAll(values)
+                            validatedHostsByClass.getOrPut(classDef.type) { mutableSetOf() }.addAll(values)
+                        }
                         "getScheme" -> deepLinkSchemes.addAll(values)
                     }
                 }
