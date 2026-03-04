@@ -35,6 +35,7 @@ To publish the DroidProbe app on Google Play I need testers so please join <http
   <img src="Screenshot1.png" alt="App Scanner" width="250"/>
   <img src="Screenshot2.png" alt="Analysis" width="250"/>
   <img src="Screenshot3.png" alt="Intent Launcher" width="250"/>
+  <img src="Screenshot4.png" alt="Deep Link Parameters" width="250"/>
 </p>
 
 ## How It Works
