@@ -4,6 +4,9 @@ Android security tool that scans installed apps bytecode to discover content pro
 
 Unlike tools like Drozer that require typing raw URIs and intent parameters, DroidProbe automatically discovers IPC surfaces from DEX bytecode and presents them as tappable, interactive UI elements.
 
+## Testing group
+To publish the DroidProbe app on Google Play I need testers so please join <https://groups.google.com/g/droidprobe> I know ADB side loading works but this way is arguably more fun 🦆
+
 ## Download
 
 [**Download debug APK**](app/build/outputs/apk/debug/app-debug.apk) — sideload directly to any Android 8.0+ device.
