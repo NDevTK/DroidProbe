@@ -1,5 +1,12 @@
 package com.droidprobe.app.ui.analysis
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,13 +16,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.droidprobe.app.DroidProbeApplication
+import com.droidprobe.app.data.model.ManifestAnalysis
 import com.droidprobe.app.data.model.SensitiveString
 import com.droidprobe.app.ui.components.SectionHeader
 
@@ -178,12 +188,7 @@ fun AnalysisScreen(
                         ) {
                             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                                 manifest.customPermissions.forEach { perm ->
-                                    Text(
-                                        text = perm,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(vertical = 2.dp)
-                                    )
+                                    CustomPermissionRow(perm, manifest)
                                 }
                             }
                         }
@@ -220,13 +225,21 @@ fun AnalysisScreen(
                             }
                         }
 
-                        if (dex.allUrlStrings.isNotEmpty()) {
+                        val sortedUrls = dex.allUrlStrings.sortedWith(compareBy {
+                            when {
+                                it.startsWith("file://") -> 0
+                                it.startsWith("http://") -> 1
+                                it.startsWith("https://") -> 2
+                                else -> 3
+                            }
+                        })
+                        if (sortedUrls.isNotEmpty()) {
                             SectionHeader(
                                 title = "URLs",
-                                count = dex.allUrlStrings.size
+                                count = sortedUrls.size
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                    dex.allUrlStrings.forEach { url ->
+                                    sortedUrls.forEach { url ->
                                         UrlRow(url)
                                     }
                                 }
@@ -239,6 +252,17 @@ fun AnalysisScreen(
             }
         }
     }
+}
+
+private fun copyToClipboard(context: Context, label: String, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+}
+
+private fun smaliToReadable(smali: String): String {
+    // Convert "Lcom/foo/Bar;" → "com.foo.Bar"
+    return smali.removePrefix("L").removeSuffix(";").replace('/', '.')
 }
 
 @Composable
@@ -272,38 +296,117 @@ private fun ActionButton(
 }
 
 @Composable
-private fun SensitiveStringRow(secret: SensitiveString) {
-    Row(
+private fun CustomPermissionRow(perm: String, manifest: ManifestAnalysis) {
+    val context = LocalContext.current
+
+    // Find components using this permission
+    val users = buildList {
+        manifest.activities.filter { it.permission == perm }.forEach { add("Activity" to it.name) }
+        manifest.services.filter { it.permission == perm }.forEach { add("Service" to it.name) }
+        manifest.receivers.filter { it.permission == perm }.forEach { add("Receiver" to it.name) }
+        manifest.providers.filter { it.permission == perm || it.readPermission == perm || it.writePermission == perm }
+            .forEach { add("Provider" to it.name) }
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .clickable { copyToClipboard(context, "Permission", perm) }
+            .padding(vertical = 4.dp)
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
-            shape = MaterialTheme.shapes.small
-        ) {
+        Text(
+            text = perm,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (users.isNotEmpty()) {
+            users.forEach { (type, name) ->
+                Row(
+                    modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = type,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = name.substringAfterLast('.'),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SensitiveStringRow(secret: SensitiveString) {
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { copyToClipboard(context, "Secret", secret.value) }
+            .padding(vertical = 3.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = secret.category,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = secret.category,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error
+                text = secret.value,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
         }
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = secret.value,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        if (secret.sourceClass.isNotEmpty()) {
+            Text(
+                text = smaliToReadable(secret.sourceClass),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp, top = 1.dp)
+            )
+        }
+        secret.associatedUrls.forEach { url ->
+            Text(
+                text = url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp, top = 1.dp)
+            )
+        }
     }
 }
 
 @Composable
 private fun UrlRow(url: String) {
+    val context = LocalContext.current
     val chipLabel: String
     val chipColor: androidx.compose.ui.graphics.Color
     when {
@@ -316,6 +419,7 @@ private fun UrlRow(url: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable { copyToClipboard(context, "URL", url) }
             .padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -339,5 +443,20 @@ private fun UrlRow(url: String) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            IconButton(
+                onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = "Open in browser",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

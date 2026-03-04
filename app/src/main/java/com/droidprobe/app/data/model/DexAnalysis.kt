@@ -3,7 +3,12 @@ package com.droidprobe.app.data.model
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class SensitiveString(val value: String, val category: String)
+data class SensitiveString(
+    val value: String,
+    val category: String,
+    val sourceClass: String = "",
+    val associatedUrls: List<String> = emptyList()
+)
 
 @Serializable
 data class DexAnalysis(
