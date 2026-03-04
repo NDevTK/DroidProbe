@@ -92,6 +92,15 @@ class StringConstantCollector {
                     isValidUri(s)
         }.sorted()
 
+    fun getAllUrlStringsWithSource(): List<Pair<String, String>> =
+        allStrings.entries
+            .filter { (s, _) ->
+                (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("file://")) &&
+                        isValidUri(s)
+            }
+            .map { (s, cls) -> s to cls }
+            .sortedBy { it.first }
+
     fun getSensitiveStrings(): List<SensitiveString> {
         // Build reverse index: class → URLs in that class
         val urlsByClass = mutableMapOf<String, MutableList<String>>()

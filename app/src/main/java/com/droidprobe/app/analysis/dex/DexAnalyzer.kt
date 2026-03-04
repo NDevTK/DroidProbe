@@ -65,6 +65,7 @@ class DexAnalyzer {
         val uriExtractor = UriPatternExtractor(manifestAnalysis, classIndex)
         val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses, classIndex)
         val callExtractor = ContentProviderCallExtractor()
+        val urlExtractor = UrlExtractor(classIndex)
 
         // --- Pass 1.5: Pre-scan for URI parameter wrapper methods ---
         // Detects methods that internally call getQueryParameter/getBooleanQueryParameter
@@ -75,6 +76,7 @@ class DexAnalyzer {
                 if (isFrameworkClass(classDef.type)) continue
                 uriExtractor.preScanForWrappers(classDef)
                 uriExtractor.preScanForBulkParamReaders(classDef)
+                urlExtractor.preScanRetrofitBuilders(classDef)
             }
         }
 
@@ -104,6 +106,7 @@ class DexAnalyzer {
                 intentExtractor.process(classDef)
                 fileProviderExtractor.process(classDef)
                 callExtractor.process(classDef)
+                urlExtractor.process(classDef)
             }
         }
 
@@ -281,6 +284,28 @@ class DexAnalyzer {
             }
         }
 
+        // Add literal URLs as fallback for any not already found by richer strategies
+        urlExtractor.addLiteralUrls(stringCollector.getAllUrlStringsWithSource())
+        val apiEndpoints = urlExtractor.getResults()
+
+        // Enrich sensitive strings with API endpoints from the same source class
+        val endpointsByClass = apiEndpoints.groupBy { it.sourceClass }
+        val sensitiveStrings = stringCollector.getSensitiveStrings().map { secret ->
+            val classEndpoints = endpointsByClass[secret.sourceClass] ?: emptyList()
+            val endpointUrls = classEndpoints
+                .map { ep -> buildString {
+                    if (ep.httpMethod != null) append("[${ep.httpMethod}] ")
+                    append(ep.fullUrl)
+                }}
+                .filter { it != secret.value }
+            if (endpointUrls.isNotEmpty()) {
+                // Prefer richer endpoint URLs over plain literal URLs
+                secret.copy(associatedUrls = endpointUrls)
+            } else {
+                secret
+            }
+        }
+
         DexAnalysis(
             packageName = manifestAnalysis.packageName,
             contentProviderUris = uriResults,
@@ -290,7 +315,8 @@ class DexAnalyzer {
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
             contentProviderCalls = callExtractor.getResults(),
             allUrlStrings = stringCollector.getAllUrlStrings(),
-            sensitiveStrings = stringCollector.getSensitiveStrings()
+            sensitiveStrings = sensitiveStrings,
+            apiEndpoints = apiEndpoints
         )
     }
 
@@ -406,6 +432,10 @@ class DexAnalyzer {
                 type.startsWith("Lcom/google/android/play/") ||
                 type.startsWith("Lcom/google/android/exoplayer") ||
                 type.startsWith("Lcom/google/android/datatransport/") ||
-                type.startsWith("Lcom/google/android/libraries/")
+                type.startsWith("Lcom/google/android/libraries/") ||
+                // HTTP client libraries (scan annotations/calls but skip internal classes)
+                type.startsWith("Lretrofit2/") ||
+                type.startsWith("Lokhttp3/") ||
+                type.startsWith("Lcom/squareup/okhttp/")
     }
 }

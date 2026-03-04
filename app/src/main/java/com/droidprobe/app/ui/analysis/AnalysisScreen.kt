@@ -225,22 +225,25 @@ fun AnalysisScreen(
                             }
                         }
 
-                        val sortedUrls = dex.allUrlStrings.sortedWith(compareBy {
-                            when {
-                                it.startsWith("file://") -> 0
-                                it.startsWith("http://") -> 1
-                                it.startsWith("https://") -> 2
-                                else -> 3
-                            }
-                        })
-                        if (sortedUrls.isNotEmpty()) {
+                        if (dex.apiEndpoints.isNotEmpty()) {
+                            val grouped = dex.apiEndpoints.groupBy { it.baseUrl.ifEmpty { "Unknown" } }
+                            val sortedGroups = grouped.entries.sortedWith(
+                                compareBy<Map.Entry<String, List<com.droidprobe.app.data.model.ApiEndpoint>>> {
+                                    classifyDomain(it.key)?.sortOrder ?: 0
+                                }.thenBy { it.key }
+                            )
+
                             SectionHeader(
-                                title = "URLs",
-                                count = sortedUrls.size
+                                title = "API Endpoints",
+                                count = dex.apiEndpoints.size
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                    sortedUrls.forEach { url ->
-                                        UrlRow(url)
+                                    sortedGroups.forEach { (host, endpoints) ->
+                                        EndpointGroupHeader(host, endpoints.size)
+                                        endpoints.sortedBy { it.path }.forEach { endpoint ->
+                                            EndpointRow(endpoint)
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
                                     }
                                 }
                             }
@@ -400,6 +403,141 @@ private fun SensitiveStringRow(secret: SensitiveString) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 4.dp, top = 1.dp)
             )
+        }
+    }
+}
+
+private data class DomainClassification(
+    val label: String,
+    val sortOrder: Int // higher = less interesting, sorted last
+)
+
+private fun classifyDomain(baseUrl: String): DomainClassification? {
+    val lower = baseUrl.lowercase()
+    return when {
+        lower.contains("firebase") || lower.contains("crashlytics") ||
+            lower.contains("mixpanel") || lower.contains("amplitude") ||
+            lower.contains("analytics") || lower.contains("flurry") ||
+            lower.contains("appsflyer") -> DomainClassification("Analytics", 3)
+        lower.contains("doubleclick") || lower.contains("admob") ||
+            lower.contains("applovin") || lower.contains("mopub") ||
+            lower.contains("unity3d") || lower.contains("adcolony") ->
+            DomainClassification("Ads", 3)
+        lower.contains("cloudfront") || lower.contains("cloudflare") ||
+            lower.contains("akamai") || lower.contains("fastly") ||
+            lower.contains("cdn") -> DomainClassification("CDN", 2)
+        lower.contains("sentry") || lower.contains("bugsnag") ||
+            lower.contains("datadog") -> DomainClassification("Monitoring", 2)
+        else -> null
+    }
+}
+
+@Composable
+private fun EndpointGroupHeader(host: String, count: Int) {
+    val classification = classifyDomain(host)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = host.removePrefix("https://").removePrefix("http://"),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.small
+        ) {
+            Text(
+                text = count.toString(),
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (classification != null) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = classification.label,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EndpointRow(endpoint: com.droidprobe.app.data.model.ApiEndpoint) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { copyToClipboard(context, "URL", endpoint.fullUrl) }
+            .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (endpoint.httpMethod != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = endpoint.httpMethod,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
+        if (endpoint.sourceType != "literal") {
+            Surface(
+                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = endpoint.sourceType,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
+        Text(
+            text = endpoint.path.ifEmpty { endpoint.fullUrl },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (endpoint.fullUrl.startsWith("http://") || endpoint.fullUrl.startsWith("https://")) {
+            IconButton(
+                onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(endpoint.fullUrl)))
+                },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = "Open in browser",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

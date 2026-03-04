@@ -23,7 +23,7 @@ class AnalysisRepository(
         // ║  collectors, manifest parsing). Invalidates ALL cached     ║
         // ║  DEX/manifest results.                                     ║
         // ╚══════════════════════════════════════════════════════════════╝
-        const val ANALYSIS_VERSION = 2
+        const val ANALYSIS_VERSION = 3
     }
 
     private val json = Json { ignoreUnknownKeys = true }

@@ -11,6 +11,16 @@ data class SensitiveString(
 )
 
 @Serializable
+data class ApiEndpoint(
+    val fullUrl: String,
+    val baseUrl: String,
+    val path: String,
+    val httpMethod: String? = null,
+    val sourceClass: String,
+    val sourceType: String
+)
+
+@Serializable
 data class DexAnalysis(
     val packageName: String,
     val contentProviderUris: List<ContentProviderInfo>,
@@ -20,5 +30,6 @@ data class DexAnalysis(
     val deepLinkUriStrings: List<String> = emptyList(),
     val contentProviderCalls: List<ContentProviderCallInfo> = emptyList(),
     val allUrlStrings: List<String> = emptyList(),
-    val sensitiveStrings: List<SensitiveString> = emptyList()
+    val sensitiveStrings: List<SensitiveString> = emptyList(),
+    val apiEndpoints: List<ApiEndpoint> = emptyList()
 )
