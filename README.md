@@ -57,7 +57,7 @@ To publish the DroidProbe app on Google Play I need testers so please join <http
 | Room | 2.8.4 |
 | Navigation Compose | 2.9.7 |
 | smali-dexlib2 | 3.0.9 |
-| Min SDK | 26 |
+| Min SDK | 31 |
 | Target SDK | 36 |
 
 ## Architecture
