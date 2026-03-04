@@ -25,13 +25,7 @@ data class LaunchableTarget(
     val categories: List<String>,
     val dataSchemes: List<String>,
     val discoveredExtras: List<IntentInfo>,
-    val discoveredDataUris: List<String> = emptyList(),
-    /** Per-URI query params: full URI string → list of param names */
-    val queryParamsByUri: Map<String, List<String>> = emptyMap(),
-    /** Per-URI query param values: full URI string → (param → values) */
-    val queryParamValuesByUri: Map<String, Map<String, List<String>>> = emptyMap(),
-    /** Per-URI query param defaults: full URI string → (param → default value) */
-    val queryParamDefaultsByUri: Map<String, Map<String, String>> = emptyMap()
+    val discoveredDataUris: List<String> = emptyList()
 )
 
 data class ExtraEntry(
@@ -56,6 +50,7 @@ data class IntentBuilderUiState(
     val extras: List<ExtraEntry> = emptyList(),
     val queryParams: List<QueryParamEntry> = emptyList(),
     val dataUri: String = "",
+    val dataUriPage: Int = 0,
     val result: String? = null,
     val error: String? = null
 )
@@ -69,6 +64,12 @@ class IntentBuilderViewModel(
     private val _uiState = MutableStateFlow(IntentBuilderUiState(packageName = packageName))
     val uiState: StateFlow<IntentBuilderUiState> = _uiState.asStateFlow()
 
+    // Cached indexes for lazy param combination building
+    private var cachedPatternsByClass = emptyMap<String, List<com.droidprobe.app.data.model.ContentProviderInfo>>()
+    private var cachedPatternsByAuthority = emptyMap<String, List<com.droidprobe.app.data.model.ContentProviderInfo>>()
+    private var cachedSchemeByAuthority = emptyMap<String, String>()
+    private var cachedProducerUrls = emptyList<String>()
+
     init {
         loadComponents()
     }
@@ -80,36 +81,47 @@ class IntentBuilderViewModel(
                 val dex = analysisRepository.getCachedDex(packageName)
                 val discoveredExtras = dex?.intentExtras ?: emptyList()
 
-                // Collect deep link URI patterns (non-content:// from UriMatcher/Uri.parse)
-                val deepLinkPatterns = dex?.contentProviderUris
-                    ?.filter { !it.uriPattern.startsWith("content://") }
-                    ?: emptyList()
-
-                // Build a scheme lookup from deep link string constants.
-                // e.g. "clock-app://com.google.android.deskclock" -> scheme "clock-app"
+                // Single pass: build scheme lookup + pattern indexes directly from contentProviderUris
+                // (avoids creating a separate 20k-element deepLinkPatterns list)
                 val schemeByAuthority = mutableMapOf<String, String>()
+                val patternsByClass = mutableMapOf<String, MutableList<com.droidprobe.app.data.model.ContentProviderInfo>>()
+                val patternsByAuthority = mutableMapOf<String, MutableList<com.droidprobe.app.data.model.ContentProviderInfo>>()
                 dex?.deepLinkUriStrings?.forEach { uriStr ->
                     val schemeEnd = uriStr.indexOf("://")
                     if (schemeEnd > 0) {
                         val scheme = uriStr.substring(0, schemeEnd)
                         val authority = uriStr.substring(schemeEnd + 3).substringBefore('/')
-                        if (authority.isNotEmpty()) {
-                            schemeByAuthority[authority] = scheme
-                        }
+                        if (authority.isNotEmpty()) schemeByAuthority[authority] = scheme
                     }
                 }
-                // Also check full URIs in contentProviderUris
-                dex?.contentProviderUris?.forEach { info ->
-                    val uri = info.uriPattern
+                dex?.contentProviderUris?.forEach { p ->
+                    val uri = p.uriPattern
                     val schemeEnd = uri.indexOf("://")
                     if (schemeEnd > 0) {
                         val scheme = uri.substring(0, schemeEnd)
                         val authority = uri.substring(schemeEnd + 3).substringBefore('/')
-                        if (scheme != "content" && authority.isNotEmpty()) {
-                            schemeByAuthority[authority] = scheme
+                        if (scheme == "content") return@forEach
+                        if (authority.isNotEmpty()) schemeByAuthority[authority] = scheme
+                        patternsByClass.getOrPut(p.sourceClass) { mutableListOf() }.add(p)
+                        patternsByAuthority.getOrPut(authority) { mutableListOf() }.add(p)
+                    } else {
+                        if (uri.startsWith("content://")) return@forEach
+                        patternsByClass.getOrPut(p.sourceClass) { mutableListOf() }.add(p)
+                        val auth = uri.substringBefore('/')
+                        if (auth.isNotEmpty()) {
+                            patternsByAuthority.getOrPut(auth) { mutableListOf() }.add(p)
                         }
                     }
                 }
+
+                // Cache indexes for lazy param resolution
+                cachedPatternsByClass = patternsByClass
+                cachedPatternsByAuthority = patternsByAuthority
+                cachedSchemeByAuthority = schemeByAuthority
+                cachedProducerUrls = (dex?.allUrlStrings ?: emptyList()) +
+                    (dex?.deepLinkUriStrings ?: emptyList())
+
+                val extrasByComponent = discoveredExtras.groupBy { it.associatedComponent }
 
                 val targets = mutableListOf<LaunchableTarget>()
 
@@ -119,18 +131,17 @@ class IntentBuilderViewModel(
                         val allCategories = comp.intentFilters.flatMap { it.categories }
                         val allSchemes = comp.intentFilters.flatMap { it.dataSchemes }
 
-                        // Match extras by associatedComponent — resolved from inheritance chain
-                        // For activity-aliases, also match against the target activity
-                        val compExtras = discoveredExtras
-                            .filter { it.associatedComponent == comp.name ||
-                                (comp.targetActivity != null && it.associatedComponent == comp.targetActivity) }
-                            .distinctBy { it.extraKey }
+                        // O(1) extras lookup instead of filtering all extras
+                        val compExtras = buildList {
+                            extrasByComponent[comp.name]?.let { addAll(it) }
+                            comp.targetActivity?.let { ta ->
+                                extrasByComponent[ta]?.let { addAll(it) }
+                            }
+                        }.distinctBy { it.extraKey }
 
-                        // Match deep link URIs by sourceClass — same approach as extras.
-                        // The sourceClass tells us which class the UriMatcher lives in.
                         val compSmali = "L${comp.name.replace('.', '/')};"
                         val targetSmali = comp.targetActivity?.let { "L${it.replace('.', '/')};" }
-                        // Build per-component scheme fallback from manifest intent filters
+
                         val compSchemeByAuthority = mutableMapOf<String, String>()
                         var compFallbackScheme: String? = null
                         for (filter in comp.intentFilters) {
@@ -145,8 +156,6 @@ class IntentBuilderViewModel(
                             }
                         }
 
-                        // Build candidate deep link URIs from intent filters with data
-                        // for URI-based matching (e.g. "https://www.google.com/hsi")
                         val filterDeepLinkUris = mutableSetOf<String>()
                         for (filter in comp.intentFilters) {
                             for (scheme in filter.dataSchemes) {
@@ -163,23 +172,15 @@ class IntentBuilderViewModel(
                         }
 
                         val compDataUris = mutableListOf<String>()
-                        val perUriParams = mutableMapOf<String, List<String>>()
-                        val perUriParamValues = mutableMapOf<String, Map<String, List<String>>>()
-                        val perUriParamDefaults = mutableMapOf<String, Map<String, String>>()
-                        for (pattern in deepLinkPatterns) {
-                            // Match by sourceClass (including alias target)
-                            val matchesByClass = pattern.sourceClass == compSmali ||
-                                (targetSmali != null && pattern.sourceClass == targetSmali)
-                            // Match by URI against intent filter data
-                            val matchesByUri = filterDeepLinkUris.any { filterUri ->
-                                pattern.uriPattern == filterUri ||
-                                    pattern.uriPattern.startsWith("$filterUri?") ||
-                                    pattern.uriPattern.startsWith("$filterUri/")
-                            }
-                            if (!matchesByClass && !matchesByUri) continue
+                        val seenUris = HashSet<String>()
+
+                        // Collect unique URIs only — params resolved lazily on URI selection
+                        val seenPatterns = HashSet<String>()
+                        fun collectPattern(p: com.droidprobe.app.data.model.ContentProviderInfo) {
+                            if (!seenPatterns.add("${p.sourceClass}|${p.uriPattern}")) return
 
                             val fullUri: String
-                            val uri = pattern.uriPattern
+                            val uri = p.uriPattern
                             if (uri.contains("://")) {
                                 fullUri = uri
                             } else {
@@ -189,27 +190,31 @@ class IntentBuilderViewModel(
                                     ?: compFallbackScheme
                                 fullUri = if (scheme != null) "$scheme://$uri" else uri
                             }
-                            compDataUris.add(fullUri)
-                            if (pattern.queryParameters.isNotEmpty()) {
-                                perUriParams[fullUri] = pattern.queryParameters.sorted()
-                            }
-                            if (pattern.queryParameterValues.isNotEmpty()) {
-                                perUriParamValues[fullUri] = pattern.queryParameterValues
-                                    .mapValues { (_, values) -> values.sorted() }
-                            }
-                            if (pattern.queryParameterDefaults.isNotEmpty()) {
-                                perUriParamDefaults[fullUri] = pattern.queryParameterDefaults
+                            if (seenUris.add(fullUri)) compDataUris.add(fullUri)
+                        }
+
+                        // Class-based matching via index
+                        patternsByClass[compSmali]?.forEach(::collectPattern)
+                        targetSmali?.let { patternsByClass[it]?.forEach(::collectPattern) }
+
+                        // URI-based matching via authority index
+                        for (filterUri in filterDeepLinkUris) {
+                            val schemeEnd = filterUri.indexOf("://")
+                            if (schemeEnd < 0) continue
+                            val auth = filterUri.substring(schemeEnd + 3).substringBefore('/')
+                            val bucket = patternsByAuthority[auth] ?: continue
+                            for (pattern in bucket) {
+                                if (pattern.uriPattern == filterUri ||
+                                    pattern.uriPattern.startsWith("$filterUri?") ||
+                                    pattern.uriPattern.startsWith("$filterUri/")) {
+                                    collectPattern(pattern)
+                                }
                             }
                         }
 
-                        // Producer URL scanning: extract query params from URL string
-                        // constants matching this component's intent filter data URIs.
-                        // Catches params from producer code (e.g. classes that build deep
-                        // link URLs) even when the consumer doesn't call getQueryParameter().
+                        // Producer URL scanning — collect base URIs only (params resolved lazily)
                         if (filterDeepLinkUris.isNotEmpty()) {
-                            val producerUrls = (dex?.allUrlStrings ?: emptyList()) +
-                                (dex?.deepLinkUriStrings ?: emptyList())
-                            for (urlStr in producerUrls) {
+                            for (urlStr in cachedProducerUrls) {
                                 val urlNoFragment = urlStr.substringBefore('#')
                                 val queryIdx = urlNoFragment.indexOf('?')
                                 if (queryIdx < 0) continue
@@ -220,44 +225,7 @@ class IntentBuilderViewModel(
                                 }
                                 if (!matchesFilter) continue
 
-                                val queryString = urlNoFragment.substring(queryIdx + 1)
-                                if (queryString.isBlank()) continue
-
-                                val parsedParams = mutableMapOf<String, MutableList<String>>()
-                                for (pair in queryString.split('&')) {
-                                    val eqIdx = pair.indexOf('=')
-                                    if (eqIdx > 0) {
-                                        val key = pair.substring(0, eqIdx)
-                                        val value = pair.substring(eqIdx + 1)
-                                        parsedParams.getOrPut(key) { mutableListOf() }.add(value)
-                                    } else if (pair.isNotBlank()) {
-                                        parsedParams.getOrPut(pair) { mutableListOf() }
-                                    }
-                                }
-                                if (parsedParams.isEmpty()) continue
-
-                                if (baseUrl !in compDataUris) {
-                                    compDataUris.add(baseUrl)
-                                }
-
-                                // Merge params into per-URI maps
-                                val existingParams = perUriParams[baseUrl]?.toMutableSet() ?: mutableSetOf()
-                                existingParams.addAll(parsedParams.keys)
-                                perUriParams[baseUrl] = existingParams.toList().sorted()
-
-                                val existingValues = perUriParamValues[baseUrl]
-                                    ?.mapValues { (_, v) -> v.toMutableSet() }?.toMutableMap()
-                                    ?: mutableMapOf()
-                                for ((key, values) in parsedParams) {
-                                    val set = existingValues.getOrPut(key) { mutableSetOf() }
-                                    set.addAll(values.filter { it.isNotEmpty() })
-                                }
-                                val mergedValues = existingValues
-                                    .filter { it.value.isNotEmpty() }
-                                    .mapValues { (_, v) -> v.toList().sorted() }
-                                if (mergedValues.isNotEmpty()) {
-                                    perUriParamValues[baseUrl] = mergedValues
-                                }
+                                if (seenUris.add(baseUrl)) compDataUris.add(baseUrl)
                             }
                         }
 
@@ -269,10 +237,7 @@ class IntentBuilderViewModel(
                                 categories = allCategories,
                                 dataSchemes = allSchemes,
                                 discoveredExtras = compExtras,
-                                discoveredDataUris = compDataUris.distinct(),
-                                queryParamsByUri = perUriParams,
-                                queryParamValuesByUri = perUriParamValues,
-                                queryParamDefaultsByUri = perUriParamDefaults
+                                discoveredDataUris = compDataUris
                             )
                         )
                     }
@@ -301,6 +266,10 @@ class IntentBuilderViewModel(
         }
     }
 
+    fun setDataUriPage(page: Int) {
+        _uiState.update { it.copy(dataUriPage = page) }
+    }
+
     fun collapseTarget() {
         _uiState.update { it.copy(expandedTarget = null, extras = emptyList(), queryParams = emptyList(), dataUri = "") }
     }
@@ -314,27 +283,101 @@ class IntentBuilderViewModel(
     }
 
     fun updateDataUri(uri: String) {
-        val target = _uiState.value.expandedTarget
-        val queryParams = if (uri.isNotBlank() && target != null) {
-            val paramNames = target.queryParamsByUri[uri] ?: emptyList()
-            val paramValues = target.queryParamValuesByUri[uri] ?: emptyMap()
-            val paramDefaults = target.queryParamDefaultsByUri[uri] ?: emptyMap()
-            paramNames.map { key ->
-                val default = paramDefaults[key]
-                val isBoolean = default == "true" || default == "false"
-                val suggestions = (paramValues[key] ?: emptyList()) +
-                    if (isBoolean) listOf("true", "false") else emptyList()
-                QueryParamEntry(
+        val queryParams = if (uri.isNotBlank()) resolveQueryParams(uri) else emptyList()
+        _uiState.update { it.copy(dataUri = uri, queryParams = queryParams) }
+    }
+
+    /** Lazily merge all param sources for a single URI into one flat param list. */
+    private fun resolveQueryParams(uri: String): List<QueryParamEntry> {
+        val params = mutableMapOf<String, QueryParamEntry>()
+
+        fun mergeParam(key: String, values: List<String> = emptyList(), default: String? = null) {
+            val existing = params[key]
+            if (existing == null) {
+                params[key] = QueryParamEntry(
                     key = key,
-                    value = "",
-                    suggestedValues = suggestions.distinct(),
+                    suggestedValues = values,
                     defaultValue = default
                 )
+            } else {
+                params[key] = existing.copy(
+                    suggestedValues = (existing.suggestedValues + values).distinct(),
+                    defaultValue = existing.defaultValue ?: default
+                )
             }
-        } else {
-            emptyList()
         }
-        _uiState.update { it.copy(dataUri = uri, queryParams = queryParams) }
+
+        fun mergeFromPattern(p: com.droidprobe.app.data.model.ContentProviderInfo) {
+            for (key in p.queryParameters) {
+                mergeParam(key, p.queryParameterValues[key] ?: emptyList(), p.queryParameterDefaults[key])
+            }
+        }
+
+        // Compare by authority+path, ignoring scheme differences
+        // (collectPattern resolves schemes using per-component maps we don't cache)
+        val uriWithoutScheme = if (uri.contains("://")) uri.substringAfter("://") else uri
+
+        fun matchesUri(p: com.droidprobe.app.data.model.ContentProviderInfo): Boolean {
+            val patternPath = if (p.uriPattern.contains("://")) p.uriPattern.substringAfter("://")
+            else p.uriPattern
+            // Compare base path only (strip query string from pattern)
+            return patternPath.substringBefore('?') == uriWithoutScheme
+        }
+
+        // From class-based patterns (matches how loadComponents collects URIs)
+        val target = _uiState.value.expandedTarget
+        if (target != null) {
+            val compSmali = "L${target.component.name.replace('.', '/')};"
+            cachedPatternsByClass[compSmali]?.forEach { p ->
+                if (matchesUri(p)) mergeFromPattern(p)
+            }
+            target.component.targetActivity?.let { ta ->
+                val targetSmali = "L${ta.replace('.', '/')};"
+                cachedPatternsByClass[targetSmali]?.forEach { p ->
+                    if (matchesUri(p)) mergeFromPattern(p)
+                }
+            }
+        }
+
+        // From authority-based patterns
+        val schemeEnd = uri.indexOf("://")
+        if (schemeEnd > 0) {
+            val auth = uri.substring(schemeEnd + 3).substringBefore('/')
+            cachedPatternsByAuthority[auth]?.forEach { p ->
+                if (matchesUri(p)) mergeFromPattern(p)
+            }
+        }
+
+        // From producer URLs matching this URI
+        for (urlStr in cachedProducerUrls) {
+            val urlNoFragment = urlStr.substringBefore('#')
+            val queryIdx = urlNoFragment.indexOf('?')
+            if (queryIdx < 0) continue
+            if (urlNoFragment.substring(0, queryIdx) != uri) continue
+
+            val queryString = urlNoFragment.substring(queryIdx + 1)
+            if (queryString.isBlank()) continue
+
+            for (pair in queryString.split('&')) {
+                val eqIdx = pair.indexOf('=')
+                if (eqIdx > 0) {
+                    val key = pair.substring(0, eqIdx)
+                    val value = pair.substring(eqIdx + 1)
+                    mergeParam(key, if (value.isNotEmpty()) listOf(value) else emptyList())
+                } else if (pair.isNotBlank()) {
+                    mergeParam(pair)
+                }
+            }
+        }
+
+        // Add boolean suggestions where applicable
+        return params.values.map { entry ->
+            val default = entry.defaultValue
+            val isBoolean = default == "true" || default == "false"
+            if (isBoolean) entry.copy(
+                suggestedValues = (entry.suggestedValues + listOf("true", "false")).distinct()
+            ) else entry
+        }
     }
 
     fun updateQueryParam(index: Int, entry: QueryParamEntry) {

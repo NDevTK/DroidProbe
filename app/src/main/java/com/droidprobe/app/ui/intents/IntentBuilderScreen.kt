@@ -20,6 +20,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Link
@@ -160,6 +162,7 @@ fun IntentBuilderScreen(
                         extras = if (isExpanded) uiState.extras else emptyList(),
                         queryParams = if (isExpanded) uiState.queryParams else emptyList(),
                         dataUri = if (isExpanded) uiState.dataUri else "",
+                        dataUriPage = if (isExpanded) uiState.dataUriPage else 0,
                         onToggleExpand = {
                             if (isExpanded) viewModel.collapseTarget()
                             else viewModel.expandTarget(target)
@@ -168,7 +171,8 @@ fun IntentBuilderScreen(
                         onLaunchWithExtras = { viewModel.launchTarget(target) },
                         onExtraChanged = { index, entry -> viewModel.updateExtra(index, entry) },
                         onQueryParamChanged = { index, entry -> viewModel.updateQueryParam(index, entry) },
-                        onDataUriChanged = { viewModel.updateDataUri(it) }
+                        onDataUriChanged = { viewModel.updateDataUri(it) },
+                        onDataUriPageChanged = { viewModel.setDataUriPage(it) }
                     )
                 }
             }
@@ -221,12 +225,14 @@ private fun TargetCard(
     extras: List<ExtraEntry>,
     queryParams: List<QueryParamEntry>,
     dataUri: String,
+    dataUriPage: Int,
     onToggleExpand: () -> Unit,
     onQuickLaunch: () -> Unit,
     onLaunchWithExtras: () -> Unit,
     onExtraChanged: (Int, ExtraEntry) -> Unit,
     onQueryParamChanged: (Int, QueryParamEntry) -> Unit,
-    onDataUriChanged: (String) -> Unit
+    onDataUriChanged: (String) -> Unit,
+    onDataUriPageChanged: (Int) -> Unit
 ) {
     val typeIcon: ImageVector = when (target.type) {
         "Activity" -> Icons.AutoMirrored.Filled.OpenInNew
@@ -235,7 +241,7 @@ private fun TargetCard(
         else -> Icons.AutoMirrored.Filled.OpenInNew
     }
 
-    val hasExpandableContent = target.discoveredExtras.isNotEmpty() || target.discoveredDataUris.isNotEmpty() || target.queryParamsByUri.isNotEmpty()
+    val hasExpandableContent = target.discoveredExtras.isNotEmpty() || target.discoveredDataUris.isNotEmpty()
 
     Card(
         modifier = Modifier
@@ -320,10 +326,6 @@ private fun TargetCard(
             if (target.discoveredDataUris.isNotEmpty()) {
                 summaryParts.add("${target.discoveredDataUris.size} data URIs")
             }
-            val totalQueryParams = target.queryParamsByUri.values.sumOf { it.size }
-            if (totalQueryParams > 0) {
-                summaryParts.add("$totalQueryParams query params")
-            }
             if (summaryParts.isNotEmpty()) {
                 Text(
                     text = summaryParts.joinToString(" + "),
@@ -393,26 +395,62 @@ private fun TargetCard(
                     modifier = Modifier.padding(top = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Deep link URI chips — tap to fill the data URI field
+                    // Deep link URI chips — paginated, tap to fill the data URI field
                     if (target.discoveredDataUris.isNotEmpty()) {
-                        Text(
-                            "Data URI (tap to select):",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        val pageSize = 20
+                        val totalUris = target.discoveredDataUris.size
+                        val totalPages = (totalUris + pageSize - 1) / pageSize
+                        val pageStart = dataUriPage * pageSize
+                        val pageUris = target.discoveredDataUris.subList(
+                            pageStart.coerceAtMost(totalUris),
+                            (pageStart + pageSize).coerceAtMost(totalUris)
                         )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "Data URI (tap to select):",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (totalPages > 1) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = { onDataUriPageChanged(dataUriPage - 1) },
+                                        enabled = dataUriPage > 0,
+                                        modifier = Modifier.height(28.dp).width(28.dp)
+                                    ) {
+                                        Icon(Icons.Default.ChevronLeft, "Previous", modifier = Modifier.height(16.dp))
+                                    }
+                                    Text(
+                                        "${dataUriPage + 1}/$totalPages",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                    IconButton(
+                                        onClick = { onDataUriPageChanged(dataUriPage + 1) },
+                                        enabled = dataUriPage < totalPages - 1,
+                                        modifier = Modifier.height(28.dp).width(28.dp)
+                                    ) {
+                                        Icon(Icons.Default.ChevronRight, "Next", modifier = Modifier.height(16.dp))
+                                    }
+                                }
+                            }
+                        }
 
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            target.discoveredDataUris.forEach { uri ->
+                            pageUris.forEach { uri ->
                                 FilterChip(
                                     selected = dataUri == uri,
                                     onClick = {
                                         onDataUriChanged(if (dataUri == uri) "" else uri)
                                     },
                                     label = {
-                                        // Show just the path portion for readability
                                         val display = uri.substringAfter("://")
                                             .substringAfter('/')
                                             .ifEmpty { uri }
@@ -434,7 +472,6 @@ private fun TargetCard(
                             }
                         }
 
-                        // Show the full selected URI
                         if (dataUri.isNotBlank()) {
                             Text(
                                 text = dataUri,
