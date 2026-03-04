@@ -1,5 +1,8 @@
 package com.droidprobe.app.data.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class ContentProviderInfo(
     val authority: String?,
     val uriPattern: String,

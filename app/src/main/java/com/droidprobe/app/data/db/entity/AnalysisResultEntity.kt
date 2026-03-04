@@ -9,6 +9,7 @@ data class AnalysisResultEntity(
     val packageName: String,
     val appName: String,
     val versionCode: Long,
+    val analysisVersion: Int,
     val manifestJson: String,
     val dexJson: String?,
     val analyzedAt: Long

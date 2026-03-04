@@ -16,7 +16,7 @@ class AppModule(private val appContext: Context) {
             appContext,
             DroidProbeDatabase::class.java,
             "droidprobe.db"
-        ).build()
+        ).fallbackToDestructiveMigration(dropAllTables = true).build()
     }
 
     val packageScanner: PackageScanner by lazy {

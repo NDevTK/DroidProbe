@@ -151,12 +151,16 @@ fun AnalysisScreen(
                         ActionButton(
                             icon = Icons.AutoMirrored.Filled.Send,
                             label = if (uiState.isDexAnalyzing) "Analyzing..." else "Intent Builder",
-                            enabled = !uiState.isDexAnalyzing,
+                            enabled = !uiState.isDexAnalyzing &&
+                                    (manifest.activities.any { it.isExported } ||
+                                            manifest.services.any { it.isExported } ||
+                                            manifest.receivers.any { it.isExported }),
                             onClick = { onNavigateToIntentBuilder(packageName) }
                         )
                         ActionButton(
                             icon = Icons.Default.Folder,
                             label = "File Providers",
+                            enabled = uiState.dexAnalysis?.fileProviderPaths?.isNotEmpty() == true,
                             onClick = { onNavigateToFileProvider(packageName) }
                         )
                     }

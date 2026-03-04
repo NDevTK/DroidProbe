@@ -1,5 +1,8 @@
 package com.droidprobe.app.data.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class ManifestAnalysis(
     val packageName: String,
     val activities: List<ExportedComponent>,
@@ -9,6 +12,7 @@ data class ManifestAnalysis(
     val customPermissions: List<String>
 )
 
+@Serializable
 data class ExportedComponent(
     val name: String,
     val isExported: Boolean,
@@ -17,6 +21,7 @@ data class ExportedComponent(
     val targetActivity: String? = null
 )
 
+@Serializable
 data class IntentFilterInfo(
     val actions: List<String>,
     val categories: List<String>,
@@ -26,6 +31,7 @@ data class IntentFilterInfo(
     val mimeTypes: List<String>
 )
 
+@Serializable
 data class ProviderComponent(
     val name: String,
     val authority: String?,
@@ -37,6 +43,7 @@ data class ProviderComponent(
     val pathPermissions: List<PathPermissionInfo>
 )
 
+@Serializable
 data class PathPermissionInfo(
     val path: String,
     val type: String,

@@ -2,8 +2,6 @@ package com.droidprobe.app.scanner
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.os.Build
-import androidx.core.content.pm.PackageInfoCompat
 import com.droidprobe.app.data.model.AppInfo
 
 class PackageScanner(private val packageManager: PackageManager) {
@@ -22,7 +20,7 @@ class PackageScanner(private val packageManager: PackageManager) {
             packageName = packageName,
             appName = packageManager.getApplicationLabel(this).toString(),
             versionName = packageInfo.versionName,
-            versionCode = PackageInfoCompat.getLongVersionCode(packageInfo),
+            versionCode = packageInfo.longVersionCode,
             sourceDir = sourceDir,
             isSystemApp = (flags and ApplicationInfo.FLAG_SYSTEM) != 0,
             icon = try {
@@ -31,7 +29,7 @@ class PackageScanner(private val packageManager: PackageManager) {
                 null
             },
             targetSdk = targetSdkVersion,
-            minSdk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) minSdkVersion else 0,
+            minSdk = minSdkVersion,
             uid = uid
         )
     }

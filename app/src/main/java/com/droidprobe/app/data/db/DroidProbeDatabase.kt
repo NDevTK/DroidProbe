@@ -17,7 +17,7 @@ import com.droidprobe.app.data.db.entity.IntentInfoEntity
         IntentInfoEntity::class,
         FileProviderPathEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class DroidProbeDatabase : RoomDatabase() {

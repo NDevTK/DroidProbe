@@ -45,8 +45,9 @@ class AnalysisViewModel(
                 val appInfo = packageManager.getApplicationInfo(packageName, 0)
                 val appName = packageManager.getApplicationLabel(appInfo).toString()
                 val sourceDir = appInfo.sourceDir
+                val versionCode = packageManager.getPackageInfo(packageName, 0).longVersionCode
 
-                val manifest = analysisRepository.analyzeManifest(packageName, sourceDir)
+                val manifest = analysisRepository.analyzeManifest(packageName, sourceDir, versionCode, appName)
 
                 _uiState.update {
                     it.copy(
@@ -58,7 +59,7 @@ class AnalysisViewModel(
                 }
 
                 // Automatically start DEX analysis
-                analyzeDexInternal(sourceDir, manifest)
+                analyzeDexInternal(sourceDir, manifest, versionCode, appName)
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -70,12 +71,19 @@ class AnalysisViewModel(
         }
     }
 
-    private suspend fun analyzeDexInternal(sourceDir: String, manifest: ManifestAnalysis) {
+    private suspend fun analyzeDexInternal(
+        sourceDir: String,
+        manifest: ManifestAnalysis,
+        versionCode: Long,
+        appName: String
+    ) {
         _uiState.update { it.copy(isDexAnalyzing = true, dexProgress = "Scanning bytecode...") }
         try {
             val dexAnalysis = analysisRepository.analyzeDex(
                 apkPath = sourceDir,
                 manifestAnalysis = manifest,
+                versionCode = versionCode,
+                appName = appName,
                 onProgress = { progress ->
                     _uiState.update { it.copy(dexProgress = progress.message) }
                 }

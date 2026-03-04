@@ -1,7 +1,11 @@
 package com.droidprobe.app.data.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class SensitiveString(val value: String, val category: String)
 
+@Serializable
 data class DexAnalysis(
     val packageName: String,
     val contentProviderUris: List<ContentProviderInfo>,

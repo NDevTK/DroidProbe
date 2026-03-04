@@ -1,35 +1,14 @@
 package com.droidprobe.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Composable
-
-private val DarkColorScheme = darkColorScheme(
-    primary = GreenPrimary,
-    onPrimary = DarkBackground,
-    primaryContainer = GreenDark,
-    onPrimaryContainer = TextPrimary,
-    secondary = BluePrimary,
-    onSecondary = DarkBackground,
-    secondaryContainer = DarkSurfaceVariant,
-    onSecondaryContainer = TextPrimary,
-    tertiary = PurpleAccent,
-    onTertiary = DarkBackground,
-    background = DarkBackground,
-    onBackground = TextPrimary,
-    surface = DarkSurface,
-    onSurface = TextPrimary,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurfaceVariant = TextSecondary,
-    error = RedWarning,
-    onError = DarkBackground,
-    outline = TextMuted
-)
+import androidx.compose.ui.platform.LocalContext
 
 @Composable
 fun DroidProbeTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = DarkColorScheme,
+        colorScheme = dynamicDarkColorScheme(LocalContext.current),
         typography = Typography,
         content = content
     )
