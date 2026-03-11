@@ -144,7 +144,10 @@ class UrlExtractor(
         "Lretrofit2/http/Path;" to "path",
         "Lretrofit2/http/Header;" to "header",
         "Lretrofit2/http/Field;" to "field",
-        "Lretrofit2/http/Body;" to "body"
+        "Lretrofit2/http/Body;" to "body",
+        "Lretrofit2/http/Part;" to "part",
+        "Lretrofit2/http/FieldMap;" to "fieldmap",
+        "Lretrofit2/http/QueryMap;" to "querymap"
     )
 
     /**
@@ -208,13 +211,21 @@ class UrlExtractor(
                 }
             }
 
-            // Scan parameter annotations for @Query, @Path, @Header, @Body, @Field
+            // Scan parameter annotations for @Query, @Path, @Header, @Body, @Field, @Part, @FieldMap, @QueryMap
             for (param in method.parameters) {
                 for (annotation in param.annotations) {
                     val kind = retrofitParamAnnotations[annotation.type] ?: continue
                     if (kind == "body") {
                         hasBody = true
                         continue
+                    }
+                    // @FieldMap and @QueryMap have no "value" element (dynamic map params)
+                    if (kind == "fieldmap") {
+                        hasBody = true
+                        continue
+                    }
+                    if (kind == "querymap") {
+                        continue  // Cannot extract individual keys from map
                     }
                     // Extract param name from "value" element
                     val paramName = annotation.elements
@@ -224,7 +235,7 @@ class UrlExtractor(
                         ?: continue
 
                     when (kind) {
-                        "query", "field" -> queryParams.add(paramName)
+                        "query", "field", "part" -> queryParams.add(paramName)
                         "path" -> pathParams.add(paramName)
                         "header" -> headerParams.add(paramName)
                     }

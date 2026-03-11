@@ -117,6 +117,14 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".receivers.OrderedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.ORDERED" />
+            </intent-filter>
+        </receiver>
+
         <!-- === Services === -->
 
         <service

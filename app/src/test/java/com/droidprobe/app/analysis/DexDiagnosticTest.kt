@@ -51,7 +51,8 @@ class DexDiagnosticTest {
                 ExportedComponent("$pkg.services.SyncService", true, null, listOf(IntentFilterInfo(listOf("$pkg.action.SYNC"), emptyList(), emptyList(), emptyList(), emptyList(), emptyList())))
             ),
             receivers = listOf(
-                ExportedComponent("$pkg.receivers.DataReceiver", true, null, listOf(IntentFilterInfo(listOf("$pkg.action.DATA"), emptyList(), emptyList(), emptyList(), emptyList(), emptyList())))
+                ExportedComponent("$pkg.receivers.DataReceiver", true, null, listOf(IntentFilterInfo(listOf("$pkg.action.DATA"), emptyList(), emptyList(), emptyList(), emptyList(), emptyList()))),
+                ExportedComponent("$pkg.receivers.OrderedReceiver", true, null, listOf(IntentFilterInfo(listOf("$pkg.action.ORDERED"), emptyList(), emptyList(), emptyList(), emptyList(), emptyList())))
             ),
             providers = listOf(
                 provider("BasicProvider", "$pkg.basic", true),

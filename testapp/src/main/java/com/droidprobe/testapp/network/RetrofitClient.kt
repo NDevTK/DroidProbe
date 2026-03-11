@@ -23,4 +23,11 @@ class RetrofitClient {
             .build()
         return retrofit.create(CdnService::class.java)
     }
+
+    fun createUploadService(): UploadService {
+        val retrofit = Retrofit.Builder()
+            .baseUrl("https://upload.example.com/")
+            .build()
+        return retrofit.create(UploadService::class.java)
+    }
 }

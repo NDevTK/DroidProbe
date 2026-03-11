@@ -2,6 +2,7 @@ package com.droidprobe.app.analysis
 
 import com.droidprobe.app.analysis.dex.DexAnalyzer
 import com.droidprobe.app.data.model.*
+import com.droidprobe.app.interaction.ApiSpecFetcher
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.runBlocking
 import org.junit.BeforeClass
@@ -117,6 +118,19 @@ class DexAnalysisIntegrationTest {
                         permission = null,
                         intentFilters = listOf(IntentFilterInfo(
                             actions = listOf("$PKG.action.DATA"),
+                            categories = emptyList(),
+                            dataSchemes = emptyList(),
+                            dataAuthorities = emptyList(),
+                            dataPaths = emptyList(),
+                            mimeTypes = emptyList()
+                        ))
+                    ),
+                    ExportedComponent(
+                        name = "$PKG.receivers.OrderedReceiver",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.ORDERED"),
                             categories = emptyList(),
                             dataSchemes = emptyList(),
                             dataAuthorities = emptyList(),
@@ -1448,5 +1462,375 @@ class DexAnalysisIntegrationTest {
         assertThat(aliasExtras).isNotEmpty()
         val actions = aliasExtras.mapNotNull { it.associatedAction }.toSet()
         assertThat(actions).contains("$PKG.action.SETTINGS_ALIAS")
+    }
+
+    // ==================== Group W: Virtual Discovery Document Synthesis ====================
+
+    @Test
+    fun `synthesize produces non-null document from testapp endpoints`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)
+        assertThat(doc).isNotNull()
+    }
+
+    @Test
+    fun `synthesize document has correct rootUrl for api example com`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        assertThat(doc.rootUrl).isEqualTo("https://api.example.com/v1/")
+    }
+
+    @Test
+    fun `synthesize groups endpoints into resources by first path segment`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        assertThat(doc.resources.keys).containsAtLeast("users", "search", "auth")
+    }
+
+    @Test
+    fun `synthesize preserves httpMethod on methods`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allMethods = doc.resources.values.flatMap { it.methods.values }.map { it.httpMethod }.toSet()
+        assertThat(allMethods).containsAtLeast("GET", "POST", "PUT", "DELETE", "PATCH")
+    }
+
+    @Test
+    fun `synthesize extracts path params with location path and required true`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val usersResource = doc.resources["users"]!!
+        val getUser = usersResource.methods.values.find { it.httpMethod == "GET" && it.path.contains("{id}") }
+        assertThat(getUser).isNotNull()
+        val idParam = getUser!!.parameters["id"]
+        assertThat(idParam).isNotNull()
+        assertThat(idParam!!.location).isEqualTo("path")
+        assertThat(idParam.required).isTrue()
+    }
+
+    @Test
+    fun `synthesize extracts query params with location query and required false`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val searchResource = doc.resources["search"]!!
+        val searchMethod = searchResource.methods.values.first()
+        val qParam = searchMethod.parameters["q"]
+        assertThat(qParam).isNotNull()
+        assertThat(qParam!!.location).isEqualTo("query")
+        assertThat(qParam.required).isFalse()
+    }
+
+    @Test
+    fun `synthesize extracts header params with location header`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allParams = doc.resources.values
+            .flatMap { it.methods.values }
+            .flatMap { it.parameters.values }
+        val headerParams = allParams.filter { it.location == "header" }
+        assertThat(headerParams).isNotEmpty()
+        assertThat(headerParams.map { it.name }).contains("Authorization")
+    }
+
+    @Test
+    fun `synthesize marks all methods with source dex`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allMethods = doc.resources.values.flatMap { it.methods.values }
+        assertThat(allMethods).isNotEmpty()
+        allMethods.forEach { method ->
+            assertThat(method.source).isEqualTo("dex")
+        }
+    }
+
+    // ==================== Group X: Virtual Discovery Document Merge ====================
+
+    @Test
+    fun `merge adds virtual-only methods to remote document`() {
+        val fetcher = ApiSpecFetcher()
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val virtual = fetcher.synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+
+        // Create a remote doc with only one method
+        val remoteMethod = DiscoveryMethod(
+            id = "GET users/{id}", httpMethod = "GET", path = "users/{id}",
+            description = "Get a user", parameters = emptyMap(), parameterOrder = emptyList(),
+            scopes = emptyList(), source = ""
+        )
+        val remote = DiscoveryDocument(
+            name = "api.example.com", version = "v1", title = "Remote API",
+            description = "Remote spec", rootUrl = "https://api.example.com/v1/",
+            servicePath = "/",
+            resources = mapOf("users" to DiscoveryResource(
+                name = "users", methods = mapOf("GET users/{id}" to remoteMethod), resources = emptyMap()
+            ))
+        )
+
+        val merged = fetcher.mergeDocuments(remote, virtual)
+        val allMethods = merged.resources.values.flatMap { it.methods.values }
+        // Should have more methods than just the one remote method
+        assertThat(allMethods.size).isGreaterThan(1)
+        // Should include virtual-only methods (e.g., POST users)
+        val virtualMethods = allMethods.filter { it.source == "dex" }
+        assertThat(virtualMethods).isNotEmpty()
+    }
+
+    @Test
+    fun `merge does not duplicate methods with same httpMethod and path`() {
+        val fetcher = ApiSpecFetcher()
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val virtual = fetcher.synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+
+        // Create remote with a method that exists in virtual too
+        val remoteMethod = DiscoveryMethod(
+            id = "GET users/{id}", httpMethod = "GET", path = "users/{id}",
+            description = "Get a user", parameters = emptyMap(), parameterOrder = emptyList(),
+            scopes = emptyList(), source = ""
+        )
+        val remote = DiscoveryDocument(
+            name = "api.example.com", version = "v1", title = "Remote API",
+            description = "Remote spec", rootUrl = "https://api.example.com/v1/",
+            servicePath = "/",
+            resources = mapOf("users" to DiscoveryResource(
+                name = "users", methods = mapOf("GET users/{id}" to remoteMethod), resources = emptyMap()
+            ))
+        )
+
+        val merged = fetcher.mergeDocuments(remote, virtual)
+        val usersResource = merged.resources["users"]!!
+        val getUserMethods = usersResource.methods.values.filter {
+            it.httpMethod == "GET" && it.path == "users/{id}"
+        }
+        // Should not have duplicates
+        assertThat(getUserMethods).hasSize(1)
+        // The kept one should be from remote (tagged as "spec")
+        assertThat(getUserMethods.first().source).isEqualTo("spec")
+    }
+
+    @Test
+    fun `merge tags remote methods with source spec`() {
+        val fetcher = ApiSpecFetcher()
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val virtual = fetcher.synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+
+        val remoteMethod = DiscoveryMethod(
+            id = "GET health", httpMethod = "GET", path = "health",
+            description = "Health check", parameters = emptyMap(), parameterOrder = emptyList(),
+            scopes = emptyList(), source = ""
+        )
+        val remote = DiscoveryDocument(
+            name = "api.example.com", version = "v1", title = "Remote API",
+            description = "Remote spec", rootUrl = "https://api.example.com/v1/",
+            servicePath = "/",
+            resources = mapOf("health" to DiscoveryResource(
+                name = "health", methods = mapOf("GET health" to remoteMethod), resources = emptyMap()
+            ))
+        )
+
+        val merged = fetcher.mergeDocuments(remote, virtual)
+        val healthMethod = merged.resources["health"]!!.methods.values.first()
+        assertThat(healthMethod.source).isEqualTo("spec")
+    }
+
+    @Test
+    fun `merge preserves remote document metadata`() {
+        val fetcher = ApiSpecFetcher()
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val virtual = fetcher.synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+
+        val remote = DiscoveryDocument(
+            name = "MyAPI", version = "v2", title = "My Remote API",
+            description = "Production API", rootUrl = "https://api.example.com/v1/",
+            servicePath = "/api/",
+            resources = emptyMap()
+        )
+
+        val merged = fetcher.mergeDocuments(remote, virtual)
+        assertThat(merged.name).isEqualTo("MyAPI")
+        assertThat(merged.version).isEqualTo("v2")
+        assertThat(merged.title).isEqualTo("My Remote API")
+        assertThat(merged.rootUrl).isEqualTo("https://api.example.com/v1/")
+    }
+
+    // ==================== Group Y: @Part/@FieldMap/@QueryMap Detection ====================
+
+    @Test
+    fun `UploadService upload has Part params file and description`() {
+        val upload = analysis.apiEndpoints.find {
+            it.sourceType == "retrofit" && it.path == "files/upload"
+        }
+        assertThat(upload).isNotNull()
+        assertThat(upload!!.queryParams).containsAtLeast("file", "description")
+    }
+
+    @Test
+    fun `UploadService upload httpMethod is POST`() {
+        val upload = analysis.apiEndpoints.find {
+            it.sourceType == "retrofit" && it.path == "files/upload"
+        }
+        assertThat(upload).isNotNull()
+        assertThat(upload!!.httpMethod).isEqualTo("POST")
+    }
+
+    @Test
+    fun `UploadService submitForm has hasBody true`() {
+        val submit = analysis.apiEndpoints.find {
+            it.sourceType == "retrofit" && it.path == "forms/submit"
+        }
+        assertThat(submit).isNotNull()
+        assertThat(submit!!.hasBody).isTrue()
+    }
+
+    @Test
+    fun `UploadService filterItems has query param sort`() {
+        val filter = analysis.apiEndpoints.find {
+            it.sourceType == "retrofit" && it.path == "items/filter"
+        }
+        assertThat(filter).isNotNull()
+        assertThat(filter!!.queryParams).contains("sort")
+    }
+
+    @Test
+    fun `UploadService endpoints NOT on other services`() {
+        val apiServiceEndpoints = analysis.apiEndpoints.filter {
+            it.sourceType == "retrofit" && it.sourceClass.contains("ApiService")
+        }
+        val uploadPaths = listOf("files/upload", "forms/submit", "items/filter")
+        for (ep in apiServiceEndpoints) {
+            assertThat(ep.path).isNotIn(uploadPaths)
+        }
+    }
+
+    // ==================== Group Z: Ordered Broadcast Extras ====================
+
+    @Test
+    fun `OrderedReceiver has command extra with type String`() {
+        val extras = extrasForComponent("$PKG.receivers.OrderedReceiver")
+        val command = extras.find { it.extraKey == "command" }
+        assertThat(command).isNotNull()
+        assertThat(command!!.extraType).isEqualTo("String")
+    }
+
+    @Test
+    fun `OrderedReceiver has associatedAction ORDERED`() {
+        val extras = extrasForComponent("$PKG.receivers.OrderedReceiver")
+        assertThat(extras).isNotEmpty()
+        val actions = extras.mapNotNull { it.associatedAction }.toSet()
+        assertThat(actions).contains("$PKG.action.ORDERED")
+    }
+
+    @Test
+    fun `OrderedReceiver extras NOT on DataReceiver`() {
+        val dataExtras = extrasForComponent("$PKG.receivers.DataReceiver")
+        val dataKeys = dataExtras.map { it.extraKey }.toSet()
+        assertThat(dataKeys).doesNotContain("command")
+    }
+
+    // ==================== Group AA: ContentResolver call() Bundle Negative ====================
+
+    @Test
+    fun `BundleCaller export call has authority and method name`() {
+        val calls = analysis.contentProviderCalls
+        val exportCall = calls.find { it.methodName == "export" }
+        assertThat(exportCall).isNotNull()
+        assertThat(exportCall!!.authority).isEqualTo("$PKG.basic")
+    }
+
+    @Test
+    fun `BundleCaller export call arg is all`() {
+        val calls = analysis.contentProviderCalls
+        val exportCall = calls.find { it.methodName == "export" }
+        assertThat(exportCall).isNotNull()
+        assertThat(exportCall!!.arg).isEqualTo("all")
+    }
+
+    // ==================== Group AB: Discovery Document Completeness ====================
+
+    @Test
+    fun `all synthesized methods have non-empty path`() {
+        val allEndpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/",
+            allEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" })!!
+        val allMethods = doc.resources.values.flatMap { it.methods.values }
+        allMethods.forEach { method ->
+            assertThat(method.path).isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `all path params have required true`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allParams = doc.resources.values
+            .flatMap { it.methods.values }
+            .flatMap { it.parameters.values }
+        val pathParams = allParams.filter { it.location == "path" }
+        assertThat(pathParams).isNotEmpty()
+        pathParams.forEach { param ->
+            assertThat(param.required).isTrue()
+        }
+    }
+
+    @Test
+    fun `all query params have required false`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allParams = doc.resources.values
+            .flatMap { it.methods.values }
+            .flatMap { it.parameters.values }
+        val queryParams = allParams.filter { it.location == "query" }
+        assertThat(queryParams).isNotEmpty()
+        queryParams.forEach { param ->
+            assertThat(param.required).isFalse()
+        }
+    }
+
+    @Test
+    fun `no synthesized method has empty httpMethod`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        val allMethods = doc.resources.values.flatMap { it.methods.values }
+        allMethods.forEach { method ->
+            assertThat(method.httpMethod).isNotEmpty()
+        }
+    }
+
+    // ==================== Group AC: API Key → Discovery Document Flow ====================
+
+    @Test
+    fun `api example com endpoints include Retrofit-extracted paths`() {
+        val apiEndpoints = analysis.apiEndpoints.filter {
+            it.baseUrl == "https://api.example.com/v1/" && it.sourceType == "retrofit"
+        }
+        val paths = apiEndpoints.map { it.path }.toSet()
+        assertThat(paths).containsAtLeast("users/{id}", "users", "search")
+    }
+
+    @Test
+    fun `Google API key associated URLs include maps example com`() {
+        val googleKey = analysis.sensitiveStrings.find {
+            it.category == "Google API Key"
+        }
+        assertThat(googleKey).isNotNull()
+        assertThat(googleKey!!.associatedUrls).isNotEmpty()
+        val hasMapsExample = googleKey.associatedUrls.any { it.contains("maps.example.com") }
+        assertThat(hasMapsExample).isTrue()
+    }
+
+    @Test
+    fun `synthesized document for api example com includes users resource`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        assertThat(doc.resources).containsKey("users")
+        val usersResource = doc.resources["users"]!!
+        assertThat(usersResource.methods).isNotEmpty()
+    }
+
+    @Test
+    fun `synthesized document servicePath is common prefix of all paths`() {
+        val apiEndpoints = analysis.apiEndpoints.filter { it.baseUrl == "https://api.example.com/v1/" }
+        val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
+        // servicePath should be "/" since paths like "users/{id}", "search", "auth/login" have no common prefix
+        assertThat(doc.servicePath).isEqualTo("/")
     }
 }
