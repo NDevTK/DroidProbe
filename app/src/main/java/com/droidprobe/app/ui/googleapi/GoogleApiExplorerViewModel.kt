@@ -67,19 +67,9 @@ class GoogleApiExplorerViewModel(
             java.net.URL(rootUrl).host
         } catch (_: Exception) { rootUrl }
 
-        val endpointSourceClasses = dex.apiEndpoints
-            .filter { it.baseUrl.contains(rootHost, ignoreCase = true) }
-            .map { it.sourceClass }
-            .toSet()
-
+        // CFG-verified: associatedUrls contains actual endpoints each key flows to
         val scored = allKeys.distinctBy { it.value }.sortedByDescending { secret ->
-            var score = 0
-            if (secret.sourceClass in endpointSourceClasses) score += 100
-            if (secret.associatedUrls.any { it.contains(rootHost, ignoreCase = true) }) score += 50
-            val secretPkg = secret.sourceClass.substringBeforeLast('/').removePrefix("L")
-            if (endpointSourceClasses.any { it.substringBeforeLast('/').removePrefix("L") == secretPkg }) score += 25
-            if (secret.category == "Google API Key" && rootHost.endsWith("googleapis.com")) score += 75
-            score
+            if (secret.associatedUrls.any { it.contains(rootHost, ignoreCase = true) }) 1 else 0
         }
 
         val bestKey = scored.firstOrNull()?.value ?: keys.first()

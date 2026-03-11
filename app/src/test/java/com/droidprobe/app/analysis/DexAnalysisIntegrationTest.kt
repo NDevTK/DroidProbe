@@ -757,27 +757,40 @@ class DexAnalysisIntegrationTest {
         assertThat(search!!.queryParams).containsNoneOf("width", "height")
     }
 
-    // ==================== API key association — NEGATIVE ====================
+    // ==================== API key association — CFG-based dataflow ====================
 
     @Test
-    fun `Google API Key NOT associated with endpoints in different classes`() {
+    fun `Google API Key associated with ApiKeyClient endpoint via dataflow`() {
         val googleKey = analysis.sensitiveStrings.find { it.category == "Google API Key" }
         assertThat(googleKey).isNotNull()
-        // The key is defined in FakeSecrets, not in OkHttpCaller or RetrofitClient
-        // It should NOT be associated with api.example.com endpoints
+        // GOOGLE_KEY flows: FakeSecrets.GOOGLE_KEY → sget-object in ApiKeyClient →
+        // addHeader("X-Api-Key", key) alongside url("https://maps.example.com/api/geocode")
+        val urls = googleKey!!.associatedUrls
+        assertThat(urls).contains("https://maps.example.com/api/geocode")
+    }
+
+    @Test
+    fun `Google API Key NOT associated with unrelated endpoints`() {
+        val googleKey = analysis.sensitiveStrings.find { it.category == "Google API Key" }
+        assertThat(googleKey).isNotNull()
+        // Key only flows to ApiKeyClient, NOT to RetrofitClient or OkHttpCaller
         val urls = googleKey!!.associatedUrls
         assertThat(urls.none { it.contains("api.example.com/v1/") }).isTrue()
     }
 
     @Test
-    fun `AWS Key NOT associated with non-FakeSecrets endpoints`() {
+    fun `AWS Key has no associated URLs - no dataflow to HTTP sink`() {
         val awsKey = analysis.sensitiveStrings.find { it.category == "AWS Key" }
         assertThat(awsKey).isNotNull()
-        // FakeSecrets also contains the Firebase URL literal, so that gets associated
-        // But it should NOT be associated with api.example.com endpoints (different class)
-        val urls = awsKey!!.associatedUrls
-        assertThat(urls.none { it.contains("api.example.com") }).isTrue()
-        assertThat(urls.none { it.contains("maps.example.com") }).isTrue()
+        // AWS_KEY is defined in FakeSecrets but never read and passed to an HTTP client
+        assertThat(awsKey!!.associatedUrls).isEmpty()
+    }
+
+    @Test
+    fun `Stripe Key has no associated URLs - no dataflow to HTTP sink`() {
+        val stripeKey = analysis.sensitiveStrings.find { it.category == "Stripe Key" }
+        assertThat(stripeKey).isNotNull()
+        assertThat(stripeKey!!.associatedUrls).isEmpty()
     }
 
     // ==================== Deep link / BulkParam cross-extractor isolation ====================
@@ -1021,17 +1034,20 @@ class DexAnalysisIntegrationTest {
         assertThat(allDefaults).isEmpty()
     }
 
-    // ==================== Group G: Positive API key association ====================
+    // ==================== Group G: CFG-based API key association ====================
 
     @Test
-    fun `FakeSecrets sensitive strings have Firebase URL in associatedUrls`() {
+    fun `only Google Key has CFG-verified URL associations among FakeSecrets`() {
         val secrets = analysis.sensitiveStrings.filter {
-            it.sourceClass.contains("FakeSecrets") && it.category != "Firebase URL"
+            it.sourceClass.contains("FakeSecrets")
         }
         assertThat(secrets).isNotEmpty()
-        secrets.forEach { secret ->
-            assertThat(secret.associatedUrls).contains("https://my-test-project.firebaseio.com")
-        }
+        // Only GOOGLE_KEY flows to an HTTP sink (ApiKeyClient.addHeader)
+        // All other FakeSecrets keys have no dataflow to HTTP sinks
+        val withUrls = secrets.filter { it.associatedUrls.isNotEmpty() }
+        assertThat(withUrls).hasSize(1)
+        assertThat(withUrls.first().category).isEqualTo("Google API Key")
+        assertThat(withUrls.first().associatedUrls).contains("https://maps.example.com/api/geocode")
     }
 
     @Test

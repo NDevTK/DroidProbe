@@ -127,7 +127,9 @@ class DexDiagnosticTest {
             "DeepLinkHandler" to "handleDeepLink",
             "DeepLinkActivity" to "onCreate",
             "BasicProvider" to "query",
-            "BulkParamReader" to "readParams"
+            "BulkParamReader" to "readParams",
+            "ApiKeyClient" to "fetchWithApiKey",
+            "FakeSecrets" to "<clinit>"
         )
 
         for (dexName in dexFile.dexEntryNames) {

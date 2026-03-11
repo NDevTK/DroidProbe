@@ -102,26 +102,16 @@ class StringConstantCollector {
             .sortedBy { it.first }
 
     fun getSensitiveStrings(): List<SensitiveString> {
-        // Build reverse index: class → URLs in that class
-        val urlsByClass = mutableMapOf<String, MutableList<String>>()
-        for ((s, cls) in allStrings) {
-            if ((s.startsWith("http://") || s.startsWith("https://")) && s.length > 10) {
-                urlsByClass.getOrPut(cls) { mutableListOf() }.add(s)
-            }
-        }
-
         val results = mutableListOf<SensitiveString>()
         val seen = mutableSetOf<String>()
         for ((s, sourceClass) in allStrings) {
             if (s.length < 10) continue
             for (pattern in SECRET_PATTERNS) {
                 if (pattern.regex.containsMatchIn(s) && seen.add(s)) {
-                    val urls = urlsByClass[sourceClass]?.filter { it != s } ?: emptyList()
                     results.add(SensitiveString(
                         value = s,
                         category = pattern.category,
-                        sourceClass = sourceClass,
-                        associatedUrls = urls
+                        sourceClass = sourceClass
                     ))
                     break
                 }

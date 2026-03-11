@@ -303,19 +303,17 @@ class DexAnalyzer {
         urlExtractor.addLiteralUrls(stringCollector.getAllUrlStringsWithSource())
         val apiEndpoints = urlExtractor.getResults()
 
-        // Enrich sensitive strings with API endpoints from the same source class
-        val endpointsByClass = apiEndpoints.groupBy { it.sourceClass }
-        val sensitiveStrings = stringCollector.getSensitiveStrings().map { secret ->
-            val classEndpoints = endpointsByClass[secret.sourceClass] ?: emptyList()
-            val endpointUrls = classEndpoints
-                .map { ep -> buildString {
-                    if (ep.httpMethod != null) append("[${ep.httpMethod}] ")
-                    append(ep.fullUrl)
-                }}
-                .filter { it != secret.value }
-            if (endpointUrls.isNotEmpty()) {
-                // Prefer richer endpoint URLs over plain literal URLs
-                secret.copy(associatedUrls = endpointUrls)
+        // CFG-based inter-procedural dataflow: track where sensitive strings actually
+        // flow through bytecode to HTTP sinks (e.g., addHeader value arguments),
+        // then associate with the URLs used in those same methods.
+        val rawSensitiveStrings = stringCollector.getSensitiveStrings()
+        val sensitiveValues = rawSensitiveStrings.map { it.value }.toSet()
+        val flowAnalyzer = SensitiveStringFlowAnalyzer(classIndex)
+        val flowAssociations = flowAnalyzer.analyze(sensitiveValues)
+        val sensitiveStrings = rawSensitiveStrings.map { secret ->
+            val urls = flowAssociations[secret.value]
+            if (urls != null && urls.isNotEmpty()) {
+                secret.copy(associatedUrls = urls.sorted().toList())
             } else {
                 secret
             }
