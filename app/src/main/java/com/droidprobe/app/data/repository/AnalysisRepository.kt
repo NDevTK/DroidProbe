@@ -10,7 +10,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 class AnalysisRepository(
     private val manifestAnalyzer: ManifestAnalyzer,
@@ -32,6 +36,18 @@ class AnalysisRepository(
     private val dexCache = ConcurrentHashMap<String, DexAnalysis>()
     private val manifestCache = ConcurrentHashMap<String, ManifestAnalysis>()
 
+    private fun gzipCompress(data: String): ByteArray {
+        val bos = ByteArrayOutputStream()
+        GZIPOutputStream(bos).use { it.write(data.toByteArray(Charsets.UTF_8)) }
+        return bos.toByteArray()
+    }
+
+    private fun gzipDecompress(data: ByteArray): String {
+        return GZIPInputStream(ByteArrayInputStream(data)).use {
+            it.readBytes().toString(Charsets.UTF_8)
+        }
+    }
+
     suspend fun analyzeManifest(
         packageName: String,
         apkPath: String? = null,
@@ -48,7 +64,8 @@ class AnalysisRepository(
                 cached.analysisVersion == ANALYSIS_VERSION
             ) {
                 try {
-                    val manifest = json.decodeFromString<ManifestAnalysis>(cached.manifestJson)
+                    val manifestStr = gzipDecompress(cached.manifestJson)
+                    val manifest = json.decodeFromString<ManifestAnalysis>(manifestStr)
                     manifestCache[packageName] = manifest
                     return manifest
                 } catch (_: Exception) {
@@ -89,7 +106,8 @@ class AnalysisRepository(
                 cached.dexJson != null
             ) {
                 try {
-                    val dex = json.decodeFromString<DexAnalysis>(cached.dexJson)
+                    val dexStr = gzipDecompress(cached.dexJson)
+                    val dex = json.decodeFromString<DexAnalysis>(dexStr)
                     dexCache[packageName] = dex
                     return dex
                 } catch (_: Exception) {
@@ -102,7 +120,7 @@ class AnalysisRepository(
             dexCache[packageName] = dex
             // Persist to disk cache
             if (versionCode > 0) {
-                persistResult(packageName, appName, versionCode, manifestAnalysis, json.encodeToString(dex))
+                persistResult(packageName, appName, versionCode, manifestAnalysis, gzipCompress(json.encodeToString(dex)))
             }
         }
     }
@@ -112,7 +130,7 @@ class AnalysisRepository(
         appName: String,
         versionCode: Long,
         manifest: ManifestAnalysis,
-        dexJson: String?
+        dexJson: ByteArray?
     ) {
         withContext(Dispatchers.IO) {
             dao.insertAnalysisResult(
@@ -121,7 +139,7 @@ class AnalysisRepository(
                     appName = appName,
                     versionCode = versionCode,
                     analysisVersion = ANALYSIS_VERSION,
-                    manifestJson = json.encodeToString(manifest),
+                    manifestJson = gzipCompress(json.encodeToString(manifest)),
                     dexJson = dexJson,
                     analyzedAt = System.currentTimeMillis()
                 )

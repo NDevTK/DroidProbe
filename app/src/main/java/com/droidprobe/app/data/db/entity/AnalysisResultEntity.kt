@@ -10,7 +10,14 @@ data class AnalysisResultEntity(
     val appName: String,
     val versionCode: Long,
     val analysisVersion: Int,
-    val manifestJson: String,
-    val dexJson: String?,
+    val manifestJson: ByteArray,
+    val dexJson: ByteArray?,
     val analyzedAt: Long
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is AnalysisResultEntity) return false
+        return packageName == other.packageName
+    }
+    override fun hashCode(): Int = packageName.hashCode()
+}
