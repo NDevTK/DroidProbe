@@ -40,7 +40,7 @@ class GoogleApiExplorerViewModel(
 
     init {
         loadApiKeys()
-        fetchDiscovery()
+        fetchDiscovery(_uiState.value.selectedApiKey)
     }
 
     private fun loadApiKeys() {
@@ -89,10 +89,10 @@ class GoogleApiExplorerViewModel(
         }
     }
 
-    private fun fetchDiscovery() {
+    private fun fetchDiscovery(apiKey: String? = null) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            fetcher.fetchSpec(rootUrl).fold(
+            fetcher.fetchSpec(rootUrl, apiKey).fold(
                 onSuccess = { doc ->
                     _uiState.update { it.copy(discovery = doc, isLoading = false) }
                 },
@@ -106,7 +106,7 @@ class GoogleApiExplorerViewModel(
     }
 
     fun retry() {
-        fetchDiscovery()
+        fetchDiscovery(_uiState.value.selectedApiKey)
     }
 
     fun selectApiKey(key: String) {

@@ -27,7 +27,6 @@ class ApiSpecFetcher {
         private val SPEC_PATHS = listOf(
             // Google Discovery
             "/\$discovery/rest",
-            "\$discovery/rest",
             // OpenAPI / Swagger common paths
             "/openapi.json",
             "/swagger.json",
@@ -45,13 +44,16 @@ class ApiSpecFetcher {
      * Probes a base URL for any known API spec format.
      * Returns the parsed DiscoveryDocument or an error.
      */
-    suspend fun fetchSpec(rootUrl: String): Result<DiscoveryDocument> =
+    suspend fun fetchSpec(rootUrl: String, apiKey: String? = null): Result<DiscoveryDocument> =
         withContext(Dispatchers.IO) {
-            val base = rootUrl.trimEnd('/')
+            val base = normalizeBaseUrl(rootUrl)
 
             var lastError: Exception? = null
             for (path in SPEC_PATHS) {
-                val url = base + path
+                var url = base + path
+                if (!apiKey.isNullOrBlank()) {
+                    url += (if ('?' in url) "&" else "?") + "key=${java.net.URLEncoder.encode(apiKey, "UTF-8")}"
+                }
                 try {
                     val body = httpGet(url) ?: continue
                     val json = JSONObject(body)
@@ -63,6 +65,17 @@ class ApiSpecFetcher {
             }
             Result.failure(lastError ?: Exception("No API specification found"))
         }
+
+    /**
+     * Strips default ports (:443 for https, :80 for http) and normalizes trailing slashes.
+     */
+    private fun normalizeBaseUrl(rootUrl: String): String {
+        var base = rootUrl.trimEnd('/')
+        // Remove default ports that can confuse URL parsing when combined with $discovery paths
+        base = base.replace(Regex("^(https://[^/:]+):443(/|$)"), "$1$2")
+        base = base.replace(Regex("^(http://[^/:]+):80(/|$)"), "$1$2")
+        return base.trimEnd('/')
+    }
 
     /**
      * Fetches a spec from an explicit URL (e.g. a swagger URL found in bytecode).
@@ -108,7 +121,7 @@ class ApiSpecFetcher {
                 queryParams["key"] = apiKey
             }
 
-            val base = rootUrl.trimEnd('/') + "/" + servicePath.trimStart('/')
+            val base = normalizeBaseUrl(rootUrl) + "/" + servicePath.trimStart('/')
             val fullPath = base.trimEnd('/') + "/" + path.trimStart('/')
             val queryString = if (queryParams.isNotEmpty()) {
                 "?" + queryParams.entries.joinToString("&") { (k, v) ->
