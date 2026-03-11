@@ -1,5 +1,7 @@
 package com.droidprobe.app.data.model
 
+enum class KeyStatus { UNTESTED, TESTING, VALID, INVALID }
+
 data class DiscoveryDocument(
     val name: String,
     val version: String,
@@ -23,7 +25,8 @@ data class DiscoveryMethod(
     val description: String,
     val parameters: Map<String, DiscoveryParameter>,
     val parameterOrder: List<String>,
-    val scopes: List<String>
+    val scopes: List<String>,
+    val source: String = ""
 )
 
 data class DiscoveryParameter(

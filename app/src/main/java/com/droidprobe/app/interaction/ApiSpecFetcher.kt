@@ -1,5 +1,6 @@
 package com.droidprobe.app.interaction
 
+import com.droidprobe.app.data.model.ApiEndpoint
 import com.droidprobe.app.data.model.DiscoveryDocument
 import com.droidprobe.app.data.model.DiscoveryMethod
 import com.droidprobe.app.data.model.DiscoveryParameter
@@ -417,5 +418,159 @@ class ApiSpecFetcher {
     private fun parseStringArray(arr: org.json.JSONArray?): List<String> {
         if (arr == null) return emptyList()
         return (0 until arr.length()).map { arr.getString(it) }
+    }
+
+    // --- Virtual discovery document synthesis ---
+
+    /**
+     * Synthesize a DiscoveryDocument from DEX-extracted ApiEndpoints.
+     * Groups endpoints by first path segment into resources, uses Retrofit-extracted
+     * annotations to populate parameters.
+     */
+    fun synthesizeFromEndpoints(baseUrl: String, endpoints: List<ApiEndpoint>): DiscoveryDocument? {
+        if (endpoints.isEmpty()) return null
+
+        val host = try {
+            java.net.URI(baseUrl).host ?: baseUrl
+        } catch (_: Exception) { baseUrl }
+
+        // Compute servicePath as longest common path prefix by segments
+        val allPaths = endpoints.map { it.path.trimStart('/') }
+        val servicePath = computeCommonPrefix(allPaths)
+
+        // Group by first segment after servicePath
+        val grouped = mutableMapOf<String, MutableMap<String, DiscoveryMethod>>()
+        for (ep in endpoints) {
+            val relPath = ep.path.trimStart('/').removePrefix(servicePath.trimStart('/').trimEnd('/')).trimStart('/')
+            val tag = relPath.substringBefore('/').ifEmpty { "root" }
+            val methods = grouped.getOrPut(tag) { mutableMapOf() }
+
+            val httpMethod = ep.httpMethod ?: "GET"
+            val methodId = "$httpMethod ${ep.path}"
+            if (methodId in methods) continue
+
+            // Build parameters from Retrofit annotations + path placeholders
+            val params = mutableMapOf<String, DiscoveryParameter>()
+            val pathParamPattern = Regex("\\{\\+?([^}]+)\\}")
+            for (match in pathParamPattern.findAll(ep.path)) {
+                val name = match.groupValues[1]
+                params[name] = DiscoveryParameter(
+                    name = name, type = "string", location = "path",
+                    required = true, description = "", default = null, enumValues = emptyList()
+                )
+            }
+            for (name in ep.pathParams) {
+                if (name !in params) {
+                    params[name] = DiscoveryParameter(
+                        name = name, type = "string", location = "path",
+                        required = true, description = "", default = null, enumValues = emptyList()
+                    )
+                }
+            }
+            for (name in ep.queryParams) {
+                params[name] = DiscoveryParameter(
+                    name = name, type = "string", location = "query",
+                    required = false, description = "", default = null, enumValues = emptyList()
+                )
+            }
+            for (name in ep.headerParams) {
+                params[name] = DiscoveryParameter(
+                    name = name, type = "string", location = "header",
+                    required = false, description = "", default = null, enumValues = emptyList()
+                )
+            }
+
+            val sourceClass = ep.sourceClass
+                .removePrefix("L").removeSuffix(";").replace('/', '.')
+            methods[methodId] = DiscoveryMethod(
+                id = methodId,
+                httpMethod = httpMethod,
+                path = ep.path,
+                description = sourceClass,
+                parameters = params,
+                parameterOrder = params.filter { it.value.location == "path" }.keys.toList(),
+                scopes = emptyList(),
+                source = "dex"
+            )
+        }
+
+        if (grouped.isEmpty()) return null
+
+        return DiscoveryDocument(
+            name = host,
+            version = "dex",
+            title = "Endpoints from bytecode analysis",
+            description = "${endpoints.size} endpoints extracted from DEX bytecode",
+            rootUrl = baseUrl,
+            servicePath = servicePath,
+            resources = grouped.map { (tag, methods) ->
+                tag to DiscoveryResource(name = tag, methods = methods, resources = emptyMap())
+            }.toMap()
+        )
+    }
+
+    /**
+     * Merge a virtual (DEX-synthesized) document into a remote spec document.
+     * Virtual methods not already present in remote get added with source="dex".
+     */
+    fun mergeDocuments(remote: DiscoveryDocument, virtual: DiscoveryDocument): DiscoveryDocument {
+        // Collect all remote method signatures for dedup
+        val remoteSignatures = mutableSetOf<String>()
+        fun collectSignatures(resources: Map<String, DiscoveryResource>) {
+            for ((_, res) in resources) {
+                for ((_, method) in res.methods) {
+                    remoteSignatures.add("${method.httpMethod} ${method.path}")
+                }
+                collectSignatures(res.resources)
+            }
+        }
+        collectSignatures(remote.resources)
+
+        // Mark remote methods with source="spec"
+        fun tagSpecSource(resources: Map<String, DiscoveryResource>): Map<String, DiscoveryResource> {
+            return resources.mapValues { (_, res) ->
+                res.copy(
+                    methods = res.methods.mapValues { (_, m) ->
+                        if (m.source.isEmpty()) m.copy(source = "spec") else m
+                    },
+                    resources = tagSpecSource(res.resources)
+                )
+            }
+        }
+
+        val taggedResources = tagSpecSource(remote.resources).toMutableMap()
+
+        // Add virtual methods that don't exist in remote
+        for ((resName, virtualRes) in virtual.resources) {
+            val newMethods = virtualRes.methods.filter { (_, m) ->
+                "${m.httpMethod} ${m.path}" !in remoteSignatures
+            }
+            if (newMethods.isEmpty()) continue
+
+            val existing = taggedResources[resName]
+            if (existing != null) {
+                taggedResources[resName] = existing.copy(
+                    methods = existing.methods + newMethods
+                )
+            } else {
+                taggedResources[resName] = virtualRes
+            }
+        }
+
+        return remote.copy(resources = taggedResources)
+    }
+
+    private fun computeCommonPrefix(paths: List<String>): String {
+        if (paths.isEmpty()) return "/"
+        val segmented = paths.map { it.split('/').filter { s -> s.isNotEmpty() } }
+        val first = segmented.first()
+        val common = mutableListOf<String>()
+        for (i in first.indices) {
+            val seg = first[i]
+            if (segmented.all { it.size > i && it[i] == seg }) {
+                common.add(seg)
+            } else break
+        }
+        return if (common.isEmpty()) "/" else "/" + common.joinToString("/") + "/"
     }
 }

@@ -6,13 +6,16 @@ import androidx.lifecycle.viewModelScope
 import com.droidprobe.app.data.model.DiscoveryDocument
 import com.droidprobe.app.data.model.DiscoveryMethod
 import com.droidprobe.app.data.model.ExecutionResult
+import com.droidprobe.app.data.model.KeyStatus
 import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.interaction.ApiSpecFetcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class GoogleApiUiState(
     val rootUrl: String = "",
@@ -25,7 +28,10 @@ data class GoogleApiUiState(
     val paramValues: Map<String, String> = emptyMap(),
     val requestBody: String = "",
     val executionResult: ExecutionResult? = null,
-    val isExecuting: Boolean = false
+    val isExecuting: Boolean = false,
+    val keyValidation: Map<String, KeyStatus> = emptyMap(),
+    val userSelectedKey: Boolean = false,
+    val autoExecuteResult: Pair<DiscoveryMethod, ExecutionResult>? = null
 )
 
 class GoogleApiExplorerViewModel(
@@ -45,7 +51,6 @@ class GoogleApiExplorerViewModel(
 
     private fun loadApiKeys() {
         val dex = analysisRepository.getCachedDex(packageName) ?: return
-        // Include all key/token-like sensitive strings as potential auth
         val keyCategories = setOf(
             "Google API Key", "Stripe Key", "Square Key", "Slack Token",
             "GitHub Token", "GitLab Token", "Twilio Key", "SendGrid Key",
@@ -58,7 +63,6 @@ class GoogleApiExplorerViewModel(
 
         val keys = allKeys.map { it.value }.distinct()
 
-        // Score each key by proximity to this rootUrl
         val rootHost = try {
             java.net.URL(rootUrl).host
         } catch (_: Exception) { rootUrl }
@@ -70,14 +74,10 @@ class GoogleApiExplorerViewModel(
 
         val scored = allKeys.distinctBy { it.value }.sortedByDescending { secret ->
             var score = 0
-            // Highest: same source class as an endpoint using this rootUrl
             if (secret.sourceClass in endpointSourceClasses) score += 100
-            // High: associated URLs contain this rootUrl host
             if (secret.associatedUrls.any { it.contains(rootHost, ignoreCase = true) }) score += 50
-            // Medium: same package prefix as endpoint source classes
             val secretPkg = secret.sourceClass.substringBeforeLast('/').removePrefix("L")
             if (endpointSourceClasses.any { it.substringBeforeLast('/').removePrefix("L") == secretPkg }) score += 25
-            // Bonus: Google API keys get a boost for googleapis.com hosts
             if (secret.category == "Google API Key" && rootHost.endsWith("googleapis.com")) score += 75
             score
         }
@@ -92,17 +92,120 @@ class GoogleApiExplorerViewModel(
     private fun fetchDiscovery(apiKey: String? = null) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
-            fetcher.fetchSpec(rootUrl, apiKey).fold(
-                onSuccess = { doc ->
-                    _uiState.update { it.copy(discovery = doc, isLoading = false) }
+
+            // Build virtual doc from DEX endpoints
+            val dex = analysisRepository.getCachedDex(packageName)
+            val rootHost = try {
+                java.net.URL(rootUrl).host
+            } catch (_: Exception) { rootUrl }
+            val matchingEndpoints = dex?.apiEndpoints?.filter {
+                it.baseUrl.contains(rootHost, ignoreCase = true)
+            } ?: emptyList()
+            val virtualDoc = fetcher.synthesizeFromEndpoints(rootUrl, matchingEndpoints)
+
+            // Attempt remote fetch
+            val remoteResult = fetcher.fetchSpec(rootUrl, apiKey)
+
+            val finalDoc = remoteResult.fold(
+                onSuccess = { remoteDoc ->
+                    if (virtualDoc != null) fetcher.mergeDocuments(remoteDoc, virtualDoc)
+                    else remoteDoc
                 },
-                onFailure = { e ->
-                    _uiState.update {
-                        it.copy(isLoading = false, error = e.message ?: "Failed to fetch discovery document")
-                    }
+                onFailure = {
+                    virtualDoc
                 }
             )
+
+            if (finalDoc != null) {
+                _uiState.update { it.copy(discovery = finalDoc, isLoading = false) }
+                autoValidateAndExecute(finalDoc)
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = remoteResult.exceptionOrNull()?.message
+                            ?: "No API specification found and no endpoints extracted"
+                    )
+                }
+            }
         }
+    }
+
+    private fun autoValidateAndExecute(doc: DiscoveryDocument) {
+        val keys = _uiState.value.apiKeys
+        if (keys.isEmpty()) return
+
+        // Find a simple GET method with no required path params
+        val testMethod = findTestMethod(doc) ?: return
+
+        viewModelScope.launch {
+            // Mark all keys as TESTING
+            val keysToTest = keys.take(5)
+            _uiState.update {
+                it.copy(keyValidation = keysToTest.associateWith { KeyStatus.TESTING })
+            }
+
+            val jobs = keysToTest.map { key ->
+                async {
+                    val result = withTimeoutOrNull(8_000L) {
+                        fetcher.executeMethod(
+                            rootUrl = doc.rootUrl.ifEmpty { rootUrl },
+                            servicePath = doc.servicePath,
+                            method = testMethod,
+                            params = emptyMap(),
+                            apiKey = key
+                        ).getOrNull()
+                    }
+                    key to result
+                }
+            }
+
+            var firstValidResult: Pair<String, ExecutionResult>? = null
+
+            for (job in jobs) {
+                val (key, result) = job.await()
+                val status = when {
+                    result == null -> KeyStatus.UNTESTED
+                    result.statusCode in 200..299 -> KeyStatus.VALID
+                    result.statusCode in listOf(401, 403) -> KeyStatus.INVALID
+                    else -> KeyStatus.UNTESTED
+                }
+                _uiState.update {
+                    it.copy(keyValidation = it.keyValidation + (key to status))
+                }
+                if (status == KeyStatus.VALID && firstValidResult == null) {
+                    firstValidResult = key to result!!
+                }
+            }
+
+            // Auto-select first valid key and show result
+            if (firstValidResult != null && !_uiState.value.userSelectedKey) {
+                _uiState.update {
+                    it.copy(
+                        selectedApiKey = firstValidResult.first,
+                        autoExecuteResult = testMethod to firstValidResult.second
+                    )
+                }
+            }
+        }
+    }
+
+    private fun findTestMethod(doc: DiscoveryDocument): DiscoveryMethod? {
+        val allMethods = mutableListOf<DiscoveryMethod>()
+        fun collect(resources: Map<String, com.droidprobe.app.data.model.DiscoveryResource>) {
+            for ((_, res) in resources) {
+                allMethods.addAll(res.methods.values)
+                collect(res.resources)
+            }
+        }
+        collect(doc.resources)
+
+        // Prefer GET with no required path params
+        return allMethods
+            .filter { it.httpMethod == "GET" }
+            .sortedBy { m -> m.parameters.count { it.value.required && it.value.location == "path" } }
+            .firstOrNull()
+            ?: allMethods.firstOrNull { it.httpMethod == "GET" }
     }
 
     fun retry() {
@@ -110,7 +213,7 @@ class GoogleApiExplorerViewModel(
     }
 
     fun selectApiKey(key: String) {
-        _uiState.update { it.copy(selectedApiKey = key) }
+        _uiState.update { it.copy(selectedApiKey = key, userSelectedKey = true) }
     }
 
     fun selectMethod(method: DiscoveryMethod?) {
@@ -118,7 +221,6 @@ class GoogleApiExplorerViewModel(
             _uiState.update { it.copy(selectedMethod = null, paramValues = emptyMap(), requestBody = "", executionResult = null) }
             return
         }
-        // Pre-fill defaults
         val defaults = method.parameters.mapValues { (_, param) ->
             param.default ?: ""
         }

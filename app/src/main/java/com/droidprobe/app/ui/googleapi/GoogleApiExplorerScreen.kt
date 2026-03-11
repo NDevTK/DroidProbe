@@ -65,6 +65,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.droidprobe.app.DroidProbeApplication
 import com.droidprobe.app.data.model.DiscoveryMethod
 import com.droidprobe.app.data.model.DiscoveryResource
+import com.droidprobe.app.data.model.KeyStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,7 +118,7 @@ fun GoogleApiExplorerScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Fetching discovery document...")
+                        Text("Fetching API spec...")
                     }
                 }
             }
@@ -144,7 +145,6 @@ fun GoogleApiExplorerScreen(
             }
             else -> {
                 val discovery = uiState.discovery ?: return@Scaffold
-                // Flatten resources into a list for LazyColumn
                 val flatItems = remember(discovery) { flattenResources(discovery.resources) }
 
                 LazyColumn(
@@ -162,12 +162,13 @@ fun GoogleApiExplorerScreen(
                         }
                     }
 
-                    // API key selector
+                    // API key selector with validation
                     if (uiState.apiKeys.isNotEmpty()) {
                         item {
                             ApiKeySelector(
                                 keys = uiState.apiKeys,
                                 selectedKey = uiState.selectedApiKey,
+                                keyValidation = uiState.keyValidation,
                                 onSelectKey = viewModel::selectApiKey
                             )
                         }
@@ -196,6 +197,13 @@ fun GoogleApiExplorerScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    // Auto-execute result
+                    uiState.autoExecuteResult?.let { (method, result) ->
+                        item {
+                            AutoExecuteResultCard(method = method, result = result, context = context)
                         }
                     }
 
@@ -291,9 +299,11 @@ private fun countMethods(resource: DiscoveryResource): Int {
 private fun ApiKeySelector(
     keys: List<String>,
     selectedKey: String?,
+    keyValidation: Map<String, KeyStatus>,
     onSelectKey: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val selectedStatus = selectedKey?.let { keyValidation[it] }
 
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
         Text(
@@ -312,6 +322,9 @@ private fun ApiKeySelector(
                 readOnly = true,
                 singleLine = true,
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                leadingIcon = selectedStatus?.let { status ->
+                    { KeyStatusIcon(status) }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
@@ -321,8 +334,17 @@ private fun ApiKeySelector(
                 onDismissRequest = { expanded = false }
             ) {
                 keys.forEach { key ->
+                    val status = keyValidation[key]
                     DropdownMenuItem(
-                        text = { Text(maskKey(key), fontFamily = FontFamily.Monospace) },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (status != null) {
+                                    KeyStatusIcon(status)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+                                Text(maskKey(key), fontFamily = FontFamily.Monospace)
+                            }
+                        },
                         onClick = {
                             onSelectKey(key)
                             expanded = false
@@ -331,12 +353,155 @@ private fun ApiKeySelector(
                 }
             }
         }
+
+        // Validation status summary
+        val testing = keyValidation.count { it.value == KeyStatus.TESTING }
+        val valid = keyValidation.count { it.value == KeyStatus.VALID }
+        val invalid = keyValidation.count { it.value == KeyStatus.INVALID }
+        if (keyValidation.isNotEmpty()) {
+            Text(
+                text = when {
+                    testing > 0 -> "Validating keys..."
+                    valid > 0 -> "$valid key${if (valid > 1) "s" else ""} validated"
+                    invalid > 0 -> "No working keys found"
+                    else -> ""
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = when {
+                    testing > 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+                    valid > 0 -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.error
+                },
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun KeyStatusIcon(status: KeyStatus) {
+    when (status) {
+        KeyStatus.TESTING -> CircularProgressIndicator(
+            modifier = Modifier.size(14.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        KeyStatus.VALID -> Surface(
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+            shape = MaterialTheme.shapes.extraSmall
+        ) {
+            Text(
+                "OK",
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        KeyStatus.INVALID -> Surface(
+            color = MaterialTheme.colorScheme.error.copy(alpha = 0.2f),
+            shape = MaterialTheme.shapes.extraSmall
+        ) {
+            Text(
+                "FAIL",
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        KeyStatus.UNTESTED -> {}
+    }
+}
+
+@Composable
+private fun AutoExecuteResultCard(
+    method: DiscoveryMethod,
+    result: com.droidprobe.app.data.model.ExecutionResult,
+    context: Context
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (result.statusCode in 200..299)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+            else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Auto-test: ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                SourceBadge(source = method.source)
+                Spacer(modifier = Modifier.width(4.dp))
+                HttpMethodBadge(method.httpMethod)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    method.path,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            ResponseViewer(result = result, context = context)
+        }
     }
 }
 
 private fun maskKey(key: String): String {
     if (key.length <= 12) return key
     return key.take(8) + "..." + key.takeLast(4)
+}
+
+@Composable
+private fun SourceBadge(source: String) {
+    if (source.isEmpty()) return
+    val (label, color) = when (source) {
+        "dex" -> "DEX" to MaterialTheme.colorScheme.tertiary
+        "spec" -> "Spec" to MaterialTheme.colorScheme.primary
+        "both" -> "Both" to MaterialTheme.colorScheme.secondary
+        else -> return
+    }
+    Surface(
+        color = color.copy(alpha = 0.15f),
+        shape = MaterialTheme.shapes.extraSmall
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = color
+        )
+    }
+}
+
+@Composable
+private fun HttpMethodBadge(httpMethod: String) {
+    val methodColor = when (httpMethod) {
+        "GET" -> MaterialTheme.colorScheme.primary
+        "POST" -> MaterialTheme.colorScheme.tertiary
+        "PUT" -> MaterialTheme.colorScheme.secondary
+        "DELETE" -> MaterialTheme.colorScheme.error
+        "PATCH" -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Surface(
+        color = methodColor.copy(alpha = 0.15f),
+        shape = MaterialTheme.shapes.small
+    ) {
+        Text(
+            text = httpMethod,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = methodColor
+        )
+    }
 }
 
 @Composable
@@ -374,15 +539,6 @@ private fun MethodRow(
     isExpanded: Boolean,
     onClick: () -> Unit
 ) {
-    val methodColor = when (method.httpMethod) {
-        "GET" -> MaterialTheme.colorScheme.primary
-        "POST" -> MaterialTheme.colorScheme.tertiary
-        "PUT" -> MaterialTheme.colorScheme.secondary
-        "DELETE" -> MaterialTheme.colorScheme.error
-        "PATCH" -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -390,17 +546,11 @@ private fun MethodRow(
             .padding(start = (16 + depth * 16).dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Surface(
-            color = methodColor.copy(alpha = 0.15f),
-            shape = MaterialTheme.shapes.small
-        ) {
-            Text(
-                text = method.httpMethod,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = methodColor
-            )
+        if (method.source.isNotEmpty()) {
+            SourceBadge(source = method.source)
+            Spacer(modifier = Modifier.width(4.dp))
         }
+        HttpMethodBadge(method.httpMethod)
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = method.path,
@@ -489,7 +639,6 @@ private fun MethodDetail(
             }
 
             // Parameters
-            // Sort: required first, then path params, then query params
             val sortedParams = method.parameters.values.sortedWith(
                 compareByDescending<com.droidprobe.app.data.model.DiscoveryParameter> { it.required }
                     .thenBy { if (it.location == "path") 0 else 1 }
@@ -604,7 +753,6 @@ private fun ResponseViewer(result: com.droidprobe.app.data.model.ExecutionResult
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // Pretty-print JSON if possible
         val displayBody = try {
             if (result.body.trimStart().startsWith("{") || result.body.trimStart().startsWith("[")) {
                 org.json.JSONObject(result.body).toString(2)

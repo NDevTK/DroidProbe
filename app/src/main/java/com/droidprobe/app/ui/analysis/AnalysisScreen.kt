@@ -213,20 +213,16 @@ fun AnalysisScreen(
                     }
 
                     uiState.dexAnalysis?.let { dex ->
-                        if (dex.sensitiveStrings.isNotEmpty()) {
-                            SectionHeader(
-                                title = "Secrets & Sensitive Strings",
-                                count = dex.sensitiveStrings.size
-                            ) {
-                                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                    dex.sensitiveStrings.forEach { secret ->
-                                        SensitiveStringRow(secret)
-                                    }
-                                }
-                            }
-                        }
+                        // Unified API Surfaces: endpoints grouped with associated keys
+                        if (dex.apiEndpoints.isNotEmpty() || dex.sensitiveStrings.isNotEmpty()) {
+                            val keyCategories = setOf(
+                                "Google API Key", "Stripe Key", "Square Key", "Slack Token",
+                                "GitHub Token", "GitLab Token", "Twilio Key", "SendGrid Key",
+                                "Mapbox Token", "Algolia Key", "Bearer Token"
+                            )
+                            val keySecrets = dex.sensitiveStrings.filter { it.category in keyCategories }
+                            val otherSecrets = dex.sensitiveStrings.filter { it.category !in keyCategories }
 
-                        if (dex.apiEndpoints.isNotEmpty()) {
                             val grouped = dex.apiEndpoints.groupBy { it.baseUrl.ifEmpty { "Unknown" } }
                             val sortedGroups = grouped.entries.sortedWith(
                                 compareBy<Map.Entry<String, List<com.droidprobe.app.data.model.ApiEndpoint>>> {
@@ -234,24 +230,88 @@ fun AnalysisScreen(
                                 }.thenBy { it.key }
                             )
 
+                            // Match keys to endpoint groups
+                            val matchedKeys = mutableMapOf<String, MutableList<SensitiveString>>()
+                            val unmatchedKeys = mutableListOf<SensitiveString>()
+                            for (secret in keySecrets) {
+                                val matchedHost = sortedGroups.map { it.key }.firstOrNull { host ->
+                                    val hostName = host.removePrefix("https://").removePrefix("http://")
+                                        .substringBefore('/').substringBefore(':').lowercase()
+                                    // Match by associated URLs
+                                    secret.associatedUrls.any { it.lowercase().contains(hostName) } ||
+                                    // Match by source class overlap with endpoint source classes
+                                    grouped[host]?.any { it.sourceClass == secret.sourceClass } == true ||
+                                    // Category heuristic: Google API Key → googleapis.com
+                                    (secret.category == "Google API Key" && hostName.endsWith("googleapis.com"))
+                                }
+                                if (matchedHost != null) {
+                                    matchedKeys.getOrPut(matchedHost) { mutableListOf() }.add(secret)
+                                } else {
+                                    unmatchedKeys.add(secret)
+                                }
+                            }
+
+                            val totalCount = dex.apiEndpoints.size + keySecrets.size
                             SectionHeader(
-                                title = "API Endpoints",
-                                count = dex.apiEndpoints.size
+                                title = "API Surfaces",
+                                count = totalCount
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                                     sortedGroups.forEach { (host, endpoints) ->
                                         val isExplorable = isExplorableApi(host)
+                                        val associatedKeys = matchedKeys[host] ?: emptyList()
                                         EndpointGroupHeader(
                                             host = host,
                                             count = endpoints.size,
-                                            onExplore = if (isExplorable) {
+                                            onExplore = if (isExplorable || associatedKeys.isNotEmpty()) {
                                                 { onNavigateToGoogleApi(packageName, host) }
                                             } else null
                                         )
+                                        // Show associated keys inline
+                                        associatedKeys.forEach { secret ->
+                                            KeyRow(secret = secret, onExplore = {
+                                                onNavigateToGoogleApi(packageName, host)
+                                            })
+                                        }
                                         endpoints.sortedBy { it.path }.forEach { endpoint ->
                                             EndpointRow(endpoint)
                                         }
                                         Spacer(modifier = Modifier.height(8.dp))
+                                    }
+
+                                    // Unassociated keys
+                                    if (unmatchedKeys.isNotEmpty()) {
+                                        EndpointGroupHeader(
+                                            host = "Unassociated Keys",
+                                            count = unmatchedKeys.size,
+                                            onExplore = null
+                                        )
+                                        unmatchedKeys.forEach { secret ->
+                                            val explorableHosts = sortedGroups
+                                                .map { it.key }
+                                                .filter { isExplorableApi(it) }
+                                            KeyRow(
+                                                secret = secret,
+                                                onExplore = if (explorableHosts.isNotEmpty()) {
+                                                    { onNavigateToGoogleApi(packageName, explorableHosts.first()) }
+                                                } else null
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                    }
+                                }
+                            }
+
+                            // Other secrets (non-key: Firebase URLs, DB URIs, private keys)
+                            if (otherSecrets.isNotEmpty()) {
+                                SectionHeader(
+                                    title = "Other Secrets",
+                                    count = otherSecrets.size
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                                        otherSecrets.forEach { secret ->
+                                            SensitiveStringRow(secret)
+                                        }
                                     }
                                 }
                             }
@@ -356,6 +416,56 @@ private fun CustomPermissionRow(perm: String, manifest: ManifestAnalysis) {
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeyRow(
+    secret: SensitiveString,
+    onExplore: (() -> Unit)? = null
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { copyToClipboard(context, "Key", secret.value) }
+            .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+            shape = MaterialTheme.shapes.small
+        ) {
+            Text(
+                text = secret.category,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = secret.value,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (onExplore != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small,
+                onClick = onExplore
+            ) {
+                Text(
+                    text = "Try",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }

@@ -98,58 +98,88 @@ class UrlExtractor(
         }
     }
 
+    private val retrofitParamAnnotations = mapOf(
+        "Lretrofit2/http/Query;" to "query",
+        "Lretrofit2/http/Path;" to "path",
+        "Lretrofit2/http/Header;" to "header",
+        "Lretrofit2/http/Field;" to "field",
+        "Lretrofit2/http/Body;" to "body"
+    )
+
     /**
-     * Strategy 1: Scan Retrofit interface methods for HTTP annotations.
+     * Strategy 1: Scan Retrofit interface methods for HTTP annotations and parameter annotations.
      */
     private fun processRetrofitAnnotations(classDef: DexBackedClassDef, className: String) {
         for (method in classDef.methods) {
-            for (annotation in method.annotations) {
-                val annotationType = annotation.type
-                val httpMethod = retrofitAnnotations[annotationType] ?: continue
+            var path: String? = null
+            var resolvedMethod: String? = null
 
-                // Extract path from annotation "value" element
-                var path: String? = null
-                var resolvedMethod = httpMethod
+            // Scan method annotations for HTTP method + path
+            for (annotation in method.annotations) {
+                val httpMethod = retrofitAnnotations[annotation.type] ?: continue
+                resolvedMethod = httpMethod
 
                 for (element in annotation.elements) {
                     when (element.name) {
                         "value" -> {
                             val value = element.value
-                            if (value is StringEncodedValue) {
-                                path = value.value
-                            }
+                            if (value is StringEncodedValue) path = value.value
                         }
                         "method" -> {
-                            // For @HTTP annotation, method is specified separately
                             val value = element.value
-                            if (value is StringEncodedValue) {
-                                resolvedMethod = value.value
-                            }
+                            if (value is StringEncodedValue) resolvedMethod = value.value
                         }
                     }
                 }
-
-                if (path == null) continue
-
-                // Find base URL: check this class, then try single global base URL
-                val baseUrl = findRetrofitBaseUrl(className)
-                val fullUrl = if (baseUrl != null) {
-                    combineBaseAndPath(baseUrl, path)
-                } else {
-                    path
-                }
-
-                addEndpoint(
-                    ApiEndpoint(
-                        fullUrl = fullUrl,
-                        baseUrl = baseUrl ?: "",
-                        path = path,
-                        httpMethod = resolvedMethod,
-                        sourceClass = className,
-                        sourceType = "retrofit"
-                    )
-                )
             }
+
+            if (path == null) continue
+
+            // Scan parameter annotations for @Query, @Path, @Header, @Body, @Field
+            val queryParams = mutableListOf<String>()
+            val pathParams = mutableListOf<String>()
+            val headerParams = mutableListOf<String>()
+            var hasBody = false
+
+            for (param in method.parameters) {
+                for (annotation in param.annotations) {
+                    val kind = retrofitParamAnnotations[annotation.type] ?: continue
+                    if (kind == "body") {
+                        hasBody = true
+                        continue
+                    }
+                    // Extract param name from "value" element
+                    val paramName = annotation.elements
+                        .firstOrNull { it.name == "value" }
+                        ?.value
+                        ?.let { (it as? StringEncodedValue)?.value }
+                        ?: continue
+
+                    when (kind) {
+                        "query", "field" -> queryParams.add(paramName)
+                        "path" -> pathParams.add(paramName)
+                        "header" -> headerParams.add(paramName)
+                    }
+                }
+            }
+
+            val baseUrl = findRetrofitBaseUrl(className)
+            val fullUrl = if (baseUrl != null) combineBaseAndPath(baseUrl, path) else path
+
+            addEndpoint(
+                ApiEndpoint(
+                    fullUrl = fullUrl,
+                    baseUrl = baseUrl ?: "",
+                    path = path,
+                    httpMethod = resolvedMethod,
+                    sourceClass = className,
+                    sourceType = "retrofit",
+                    queryParams = queryParams,
+                    pathParams = pathParams,
+                    headerParams = headerParams,
+                    hasBody = hasBody
+                )
+            )
         }
     }
 

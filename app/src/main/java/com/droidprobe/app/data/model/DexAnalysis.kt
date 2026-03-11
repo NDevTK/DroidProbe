@@ -17,7 +17,11 @@ data class ApiEndpoint(
     val path: String,
     val httpMethod: String? = null,
     val sourceClass: String,
-    val sourceType: String
+    val sourceType: String,
+    val queryParams: List<String> = emptyList(),
+    val pathParams: List<String> = emptyList(),
+    val headerParams: List<String> = emptyList(),
+    val hasBody: Boolean = false
 )
 
 @Serializable
