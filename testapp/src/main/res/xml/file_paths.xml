@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="documents" path="docs/" />
+    <cache-path name="temp" path="tmp/" />
+    <external-path name="downloads" path="Download/" />
+    <root-path name="root" path="" />
+</paths>

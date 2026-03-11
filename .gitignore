@@ -8,6 +8,7 @@
 /google_smali
 /Google.apk
 /apktool.jar
+/testapp/build
 .externalNativeBuild
 .cxx
 local.properties

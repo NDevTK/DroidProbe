@@ -45,12 +45,13 @@ class UriPatternExtractor(
     // Unscoped: params from methods without UriMatcher dispatch (helper methods)
     private val queryParamsByClass = mutableMapOf<String, MutableSet<String>>()
     private val queryParamValuesByClass = mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
-    // Scoped: params associated with specific UriMatcher match codes via CFG reachability
-    private val queryParamsByMatchCode = mutableMapOf<Int, MutableSet<String>>()
-    private val queryParamValuesByMatchCode = mutableMapOf<Int, MutableMap<String, MutableSet<String>>>()
+    // Scoped: params associated with specific UriMatcher match codes via CFG reachability.
+    // Keyed by "className:matchCode" to prevent cross-class match code collisions.
+    private val queryParamsByMatchCode = mutableMapOf<String, MutableSet<String>>()
+    private val queryParamValuesByMatchCode = mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
     // Inter-procedural: classes instantiated under specific match codes in dispatch methods.
     // Used to pull in class-level params from helper/handler classes (e.g. bwn for alarm/create).
-    private val classesForMatchCode = mutableMapOf<Int, MutableSet<String>>()
+    private val classesForMatchCode = mutableMapOf<String, MutableSet<String>>()
 
     /**
      * Inter-procedural: wrapper method summaries.
@@ -65,7 +66,7 @@ class UriPatternExtractor(
     private val wrapperSummaries = mutableMapOf<String, WrapperSummary>()
 
     // Default values for query parameters (param name → default value string)
-    private val queryParamDefaultsByMatchCode = mutableMapOf<Int, MutableMap<String, String>>()
+    private val queryParamDefaultsByMatchCode = mutableMapOf<String, MutableMap<String, String>>()
     private val queryParamDefaultsByClass = mutableMapOf<String, MutableMap<String, String>>()
 
     // Hosts validated via getHost() + equals("host") — used for host-based orphan matching
@@ -582,14 +583,15 @@ class UriPatternExtractor(
 
             // 1. Match-code-scoped params (from dispatch methods with UriMatcher)
             if (info.matchCode != null) {
-                queryParamsByMatchCode[info.matchCode]?.let { params.addAll(it) }
-                queryParamValuesByMatchCode[info.matchCode]?.forEach { (param, vals) ->
+                val scopeKey = "${info.sourceClass}:${info.matchCode}"
+                queryParamsByMatchCode[scopeKey]?.let { params.addAll(it) }
+                queryParamValuesByMatchCode[scopeKey]?.forEach { (param, vals) ->
                     paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
                 }
-                queryParamDefaultsByMatchCode[info.matchCode]?.let { defaults.putAll(it) }
+                queryParamDefaultsByMatchCode[scopeKey]?.let { defaults.putAll(it) }
 
                 // 1b. Inter-procedural: params from classes instantiated under this match code.
-                classesForMatchCode[info.matchCode]?.forEach { assocClass ->
+                classesForMatchCode[scopeKey]?.forEach { assocClass ->
                     queryParamsByClass[assocClass]?.let { params.addAll(it) }
                     queryParamValuesByClass[assocClass]?.forEach { (param, vals) ->
                         paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
@@ -758,7 +760,7 @@ class UriPatternExtractor(
                     val matchCodes = findMatchCodesForInstruction(i, matchDispatch)
                     if (matchCodes.isNotEmpty()) {
                         for (code in matchCodes) {
-                            classesForMatchCode.getOrPut(code) { mutableSetOf() }.add(targetClass)
+                            classesForMatchCode.getOrPut("${classDef.type}:$code") { mutableSetOf() }.add(targetClass)
                         }
                         DexDebugLog.log("[UriParam] Constructor association: $targetClass " +
                             "instantiated under matchCodes=$matchCodes")
@@ -976,12 +978,13 @@ class UriPatternExtractor(
         }
 
         if (matchCodes.isNotEmpty()) {
-            // Scoped: associate param with specific match codes
+            // Scoped: associate param with specific match codes (keyed by class:code)
             for (code in matchCodes) {
-                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                val scopeKey = "${classDef.type}:$code"
+                queryParamsByMatchCode.getOrPut(scopeKey) { mutableSetOf() }.add(paramName)
                 if (values.isNotEmpty()) {
                     queryParamValuesByMatchCode
-                        .getOrPut(code) { mutableMapOf() }
+                        .getOrPut(scopeKey) { mutableMapOf() }
                         .getOrPut(paramName) { mutableSetOf() }
                         .addAll(values)
                 }
@@ -1037,10 +1040,11 @@ class UriPatternExtractor(
 
         if (matchCodes.isNotEmpty()) {
             for (code in matchCodes) {
-                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                val scopeKey = "${classDef.type}:$code"
+                queryParamsByMatchCode.getOrPut(scopeKey) { mutableSetOf() }.add(paramName)
                 if (defaultStr != null) {
                     queryParamDefaultsByMatchCode
-                        .getOrPut(code) { mutableMapOf() }[paramName] = defaultStr
+                        .getOrPut(scopeKey) { mutableMapOf() }[paramName] = defaultStr
                 }
             }
         } else {
@@ -1104,10 +1108,11 @@ class UriPatternExtractor(
 
         if (matchCodes.isNotEmpty()) {
             for (code in matchCodes) {
-                queryParamsByMatchCode.getOrPut(code) { mutableSetOf() }.add(paramName)
+                val scopeKey = "${classDef.type}:$code"
+                queryParamsByMatchCode.getOrPut(scopeKey) { mutableSetOf() }.add(paramName)
                 if (defaultStr != null) {
                     queryParamDefaultsByMatchCode
-                        .getOrPut(code) { mutableMapOf() }[paramName] = defaultStr
+                        .getOrPut(scopeKey) { mutableMapOf() }[paramName] = defaultStr
                 }
             }
         } else {

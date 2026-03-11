@@ -412,7 +412,7 @@ class UrlExtractor(
     // --- Helpers ---
 
     private fun addEndpoint(endpoint: ApiEndpoint) {
-        val key = "${endpoint.fullUrl}|${endpoint.sourceClass}"
+        val key = "${endpoint.httpMethod ?: "?"}|${endpoint.fullUrl}|${endpoint.sourceClass}"
         val existing = endpoints[key]
         if (existing != null) {
             val existingPriority = sourceTypePriority[existing.sourceType] ?: 0

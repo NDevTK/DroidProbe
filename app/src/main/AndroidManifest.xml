@@ -22,39 +22,5 @@
             </intent-filter>
         </activity>
 
-        <!-- Test activities for verifying extras detection -->
-        <activity
-            android:name=".test.TestDirectActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.droidprobe.action.TEST_DIRECT" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
-
-        <activity
-            android:name=".test.TestInheritedActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.droidprobe.action.TEST_INHERITED" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
-        <!-- Test content provider for verifying Content Provider Explorer -->
-        <provider
-            android:name=".test.TestContentProvider"
-            android:authorities="com.droidprobe.test.provider"
-            android:exported="true" />
-
-        <!-- Test file provider for verifying FileProvider Browser -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="com.droidprobe.test.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/test_file_paths" />
-        </provider>
     </application>
 </manifest>

@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="DroidProbe TestApp"
+        android:supportsRtl="true">
+
+        <!-- === Activities === -->
+
+        <activity
+            android:name=".activities.DirectExtraActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.DIRECT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.BaseExtraActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".activities.InheritedChildActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.INHERITED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.ValueScanActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.VALUES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.BundleExtraActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.BUNDLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.PutExtraActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.PUT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.InterProcActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.INTERPROC" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.DeepLinkActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="testapp" android:host="open" />
+            </intent-filter>
+        </activity>
+
+        <!-- === Content Providers === -->
+
+        <provider
+            android:name=".providers.BasicProvider"
+            android:authorities="com.droidprobe.testapp.basic"
+            android:exported="true" />
+
+        <provider
+            android:name=".providers.DispatchProvider"
+            android:authorities="com.droidprobe.testapp.dispatch"
+            android:exported="true" />
+
+        <provider
+            android:name=".providers.ParamProvider"
+            android:authorities="com.droidprobe.testapp.params"
+            android:exported="true" />
+
+        <provider
+            android:name=".providers.StaticUriProvider"
+            android:authorities="com.droidprobe.testapp.static"
+            android:exported="true" />
+
+        <!-- === FileProvider === -->
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.droidprobe.testapp.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+</manifest>

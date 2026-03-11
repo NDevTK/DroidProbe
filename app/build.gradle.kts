@@ -77,8 +77,23 @@ dependencies {
     // Testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testImplementation("com.google.truth:truth:1.4.4")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+}
+
+// Copy testapp APK into test resources for DexAnalysisIntegrationTest
+val copyTestApk by tasks.registering(Copy::class) {
+    dependsOn(":testapp:assembleDebug")
+    from(project(":testapp").layout.buildDirectory.file("outputs/apk/debug/testapp-debug.apk"))
+    into(layout.projectDirectory.dir("src/test/resources"))
+    rename { "testapp.apk" }
+}
+
+tasks.matching {
+    it.name.contains("UnitTest") || it.name.contains("unitTest") || it.name.contains("TestJavaRes")
+}.configureEach {
+    dependsOn(copyTestApk)
 }

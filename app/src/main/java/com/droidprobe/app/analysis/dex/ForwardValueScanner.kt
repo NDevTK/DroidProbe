@@ -9,6 +9,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
+import com.android.tools.smali.dexlib2.iface.instruction.OffsetInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.PackedSwitchPayload
 import com.android.tools.smali.dexlib2.iface.instruction.formats.SparseSwitchPayload
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
@@ -558,12 +559,27 @@ object ForwardValueScanner {
 
     /** Find switch payload values for a packed-switch or sparse-switch instruction. */
     private fun findSwitchPayload(instructions: List<Instruction>, switchIndex: Int): List<Int>? {
-        for (j in switchIndex + 1 until instructions.size) {
-            val payload = instructions[j]
-            when (payload) {
-                is PackedSwitchPayload -> return payload.switchElements.map { it.key }
-                is SparseSwitchPayload -> return payload.switchElements.map { it.key }
+        val switchInstr = instructions[switchIndex]
+        if (switchInstr !is OffsetInstruction) return null
+
+        // Use the code offset to find the exact payload instruction.
+        // The offset is in code units from the switch instruction's address.
+        val targetCodeOffset = switchInstr.codeOffset
+        var codeAddr = 0
+        var switchCodeAddr = 0
+        for (i in instructions.indices) {
+            if (i == switchIndex) switchCodeAddr = codeAddr
+            codeAddr += instructions[i].codeUnits
+        }
+        val payloadAddr = switchCodeAddr + targetCodeOffset
+        codeAddr = 0
+        for (i in instructions.indices) {
+            if (codeAddr == payloadAddr) {
+                val payload = instructions[i]
+                if (payload is PackedSwitchPayload) return payload.switchElements.map { it.key }
+                if (payload is SparseSwitchPayload) return payload.switchElements.map { it.key }
             }
+            codeAddr += instructions[i].codeUnits
         }
         return null
     }
