@@ -221,9 +221,16 @@ object ForwardValueScanner {
                             extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
                         }
 
-                        // String.startsWith
+                        // String.startsWith (Java direct call)
                         if (ref.definingClass == "Ljava/lang/String;" && ref.name == "startsWith" &&
                             ref.parameterTypes.size == 1 && instr.registerC == trackedReg
+                        ) {
+                            regStrings[instr.registerD]?.let { values.add(it) }
+                        }
+                        // Kotlin StringsKt.startsWith$default(self, prefix, ignoreCase, flags, handler)
+                        if (ref.definingClass == "Lkotlin/text/StringsKt;" &&
+                            ref.name == "startsWith\$default" &&
+                            instr.registerC == trackedReg
                         ) {
                             regStrings[instr.registerD]?.let { values.add(it) }
                         }

@@ -67,6 +67,24 @@
         </activity>
 
         <activity
+            android:name=".activities.StringSwitchActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.SWITCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.PrefixValueActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.PREFIX" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".activities.DeepLinkActivity"
             android:exported="true">
             <intent-filter>

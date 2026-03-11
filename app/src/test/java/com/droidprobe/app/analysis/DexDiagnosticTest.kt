@@ -39,6 +39,8 @@ class DexDiagnosticTest {
                 activity("BundleExtraActivity", true, actionFilter("$pkg.action.BUNDLE")),
                 activity("PutExtraActivity", true, actionFilter("$pkg.action.PUT")),
                 activity("InterProcActivity", true, actionFilter("$pkg.action.INTERPROC")),
+                activity("StringSwitchActivity", true, actionFilter("$pkg.action.SWITCH")),
+                activity("PrefixValueActivity", true, actionFilter("$pkg.action.PREFIX")),
                 activity("DeepLinkActivity", true, listOf(IntentFilterInfo(
                     listOf("android.intent.action.VIEW"),
                     listOf("android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"),
@@ -129,7 +131,9 @@ class DexDiagnosticTest {
             "BasicProvider" to "query",
             "BulkParamReader" to "readParams",
             "ApiKeyClient" to "fetchWithApiKey",
-            "FakeSecrets" to "<clinit>"
+            "FakeSecrets" to "<clinit>",
+            "PrefixValueActivity" to "onCreate",
+            "StringSwitchActivity" to "onCreate"
         )
 
         for (dexName in dexFile.dexEntryNames) {

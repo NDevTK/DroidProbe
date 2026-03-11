@@ -72,6 +72,15 @@ class UriPatternExtractor(
     // Hosts validated via getHost() + equals("host") — used for host-based orphan matching
     private val validatedHostsByClass = mutableMapOf<String, MutableSet<String>>()
 
+    // Deep link param scoping: track class-level param call indices for gated BFS reachability
+    private val queryParamCallIndicesByClass = mutableMapOf<String, MutableMap<String, MutableSet<Int>>>()
+    // Deep link URI → params that are gated-BFS-reachable from that URI's path component
+    private val queryParamsByDeepLinkUri = mutableMapOf<String, MutableSet<String>>()
+    private val queryParamValuesByDeepLinkUri = mutableMapOf<String, MutableMap<String, MutableSet<String>>>()
+    private val queryParamDefaultsByDeepLinkUri = mutableMapOf<String, MutableMap<String, String>>()
+    // Classes where deep link param scoping was performed (use per-URI params instead of class-level)
+    private val deepLinkScopedClasses = mutableSetOf<String>()
+
     /**
      * Strategy 6: Bulk param reader detection.
      * Methods that call Uri.getQueryParameterNames() and then read individual params
@@ -606,11 +615,23 @@ class UriPatternExtractor(
             }
 
             // 2. Class-level params (from helper methods without dispatch context)
-            queryParamsByClass[info.sourceClass]?.let { params.addAll(it) }
-            queryParamValuesByClass[info.sourceClass]?.forEach { (param, vals) ->
-                paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+            // For deep link URIs from classes with gated param scoping, use per-URI params
+            // instead of class-level to prevent params from leaking across gated paths.
+            val isDeepLink = !info.uriPattern.startsWith("content://") &&
+                info.sourceClass in deepLinkScopedClasses
+            if (isDeepLink) {
+                queryParamsByDeepLinkUri[info.uriPattern]?.let { params.addAll(it) }
+                queryParamValuesByDeepLinkUri[info.uriPattern]?.forEach { (param, vals) ->
+                    paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+                }
+                queryParamDefaultsByDeepLinkUri[info.uriPattern]?.let { defaults.putAll(it) }
+            } else {
+                queryParamsByClass[info.sourceClass]?.let { params.addAll(it) }
+                queryParamValuesByClass[info.sourceClass]?.forEach { (param, vals) ->
+                    paramValues.getOrPut(param) { mutableSetOf() }.addAll(vals)
+                }
+                queryParamDefaultsByClass[info.sourceClass]?.let { defaults.putAll(it) }
             }
-            queryParamDefaultsByClass[info.sourceClass]?.let { defaults.putAll(it) }
 
             if (params.isNotEmpty()) {
                 info.copy(
@@ -813,6 +834,42 @@ class UriPatternExtractor(
                     for (path in associatedPaths) {
                         if (!path.value.startsWith('/')) continue
                         addResult("${scheme.value}://${host.value}${path.value}", null, classDef, method.name)
+                    }
+                }
+            }
+
+            // Scope class-level params to specific deep link URIs via gated BFS reachability.
+            // For each deep link path's matchedContinuation, check which getQueryParameter call
+            // indices are gated-reachable. Only associate params with URIs whose path gate reaches them.
+            val classCallIndices = queryParamCallIndicesByClass[classDef.type]
+            if (classCallIndices != null) {
+                deepLinkScopedClasses.add(classDef.type)
+                for (path in deepLinkPaths) {
+                    if (path.matchedContinuation < 0) continue
+                    val matchingUris = results.filter {
+                        it.sourceClass == classDef.type &&
+                            !it.uriPattern.startsWith("content://") &&
+                            it.uriPattern.endsWith(path.value)
+                    }
+                    if (matchingUris.isEmpty()) continue
+                    for ((paramName, callIndices) in classCallIndices) {
+                        for (callIdx in callIndices) {
+                            if (gatedBfsReachable(path.matchedContinuation, callIdx, cfg.successors, gatingMap)) {
+                                for (uri in matchingUris) {
+                                    queryParamsByDeepLinkUri.getOrPut(uri.uriPattern) { mutableSetOf() }.add(paramName)
+                                    queryParamValuesByClass[classDef.type]?.get(paramName)?.let { vals ->
+                                        queryParamValuesByDeepLinkUri
+                                            .getOrPut(uri.uriPattern) { mutableMapOf() }
+                                            .getOrPut(paramName) { mutableSetOf() }
+                                            .addAll(vals)
+                                    }
+                                    queryParamDefaultsByClass[classDef.type]?.get(paramName)?.let { default ->
+                                        queryParamDefaultsByDeepLinkUri
+                                            .getOrPut(uri.uriPattern) { mutableMapOf() }[paramName] = default
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1182,6 +1239,11 @@ class UriPatternExtractor(
                     .getOrPut(paramName) { mutableSetOf() }
                     .addAll(values)
             }
+            // Track call index for deep link param scoping via gated BFS
+            queryParamCallIndicesByClass
+                .getOrPut(classDef.type) { mutableMapOf() }
+                .getOrPut(paramName) { mutableSetOf() }
+                .add(callIndex)
         }
 
         if (values.isNotEmpty()) {
@@ -1237,6 +1299,11 @@ class UriPatternExtractor(
                 queryParamDefaultsByClass
                     .getOrPut(classDef.type) { mutableMapOf() }[paramName] = defaultStr
             }
+            // Track call index for deep link param scoping via gated BFS
+            queryParamCallIndicesByClass
+                .getOrPut(classDef.type) { mutableMapOf() }
+                .getOrPut(paramName) { mutableSetOf() }
+                .add(callIndex)
         }
     }
 
@@ -1305,6 +1372,11 @@ class UriPatternExtractor(
                 queryParamDefaultsByClass
                     .getOrPut(classDef.type) { mutableMapOf() }[paramName] = defaultStr
             }
+            // Track call index for deep link param scoping via gated BFS
+            queryParamCallIndicesByClass
+                .getOrPut(classDef.type) { mutableMapOf() }
+                .getOrPut(paramName) { mutableSetOf() }
+                .add(callIndex)
         }
     }
 

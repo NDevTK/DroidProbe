@@ -80,6 +80,8 @@ class DexAnalysisIntegrationTest {
                     activity("BundleExtraActivity", true, actionFilter("$PKG.action.BUNDLE")),
                     activity("PutExtraActivity", true, actionFilter("$PKG.action.PUT")),
                     activity("InterProcActivity", true, actionFilter("$PKG.action.INTERPROC")),
+                    activity("StringSwitchActivity", true, actionFilter("$PKG.action.SWITCH")),
+                    activity("PrefixValueActivity", true, actionFilter("$PKG.action.PREFIX")),
                     activity("DeepLinkActivity", true, listOf(
                         IntentFilterInfo(
                             actions = listOf("android.intent.action.VIEW"),
@@ -89,7 +91,9 @@ class DexAnalysisIntegrationTest {
                             dataPaths = emptyList(),
                             mimeTypes = emptyList()
                         )
-                    ))
+                    )),
+                    activity("SettingsAlias", true, actionFilter("$PKG.action.SETTINGS_ALIAS"),
+                        target = "$PKG.activities.ValueScanActivity")
                 ),
                 services = listOf(
                     ExportedComponent(
@@ -787,8 +791,10 @@ class DexAnalysisIntegrationTest {
     }
 
     @Test
-    fun `Stripe Key has no associated URLs - no dataflow to HTTP sink`() {
-        val stripeKey = analysis.sensitiveStrings.find { it.category == "Stripe Key" }
+    fun `FakeSecrets Stripe Key has no associated URLs - no dataflow to HTTP sink`() {
+        val stripeKey = analysis.sensitiveStrings.find {
+            it.category == "Stripe Key" && it.value.contains("sk_live_FakeStripeKey")
+        }
         assertThat(stripeKey).isNotNull()
         assertThat(stripeKey!!.associatedUrls).isEmpty()
     }
@@ -1187,5 +1193,260 @@ class DexAnalysisIntegrationTest {
     fun `deep link ref param NOT in API endpoint query params`() {
         val apiParams = analysis.apiEndpoints.flatMap { it.queryParams }.toSet()
         assertThat(apiParams).doesNotContain("ref")
+    }
+
+    // ==================== Group M: String switch value detection ====================
+
+    @Test
+    fun `StringSwitch category has values food drink dessert`() {
+        val extras = extrasFor("StringSwitchActivity")
+        val category = extras.find { it.extraKey == "category" }
+        assertThat(category).isNotNull()
+        assertThat(category!!.possibleValues).containsAtLeast("food", "drink", "dessert")
+    }
+
+    @Test
+    fun `StringSwitch category type is String`() {
+        val extras = extrasFor("StringSwitchActivity")
+        val category = extras.find { it.extraKey == "category" }
+        assertThat(category).isNotNull()
+        assertThat(category!!.extraType).isEqualTo("String")
+    }
+
+    @Test
+    fun `StringSwitch category NOT on other activities`() {
+        val otherActivities = listOf("DirectExtraActivity", "ValueScanActivity", "PrefixValueActivity")
+        for (act in otherActivities) {
+            val extras = extrasFor(act)
+            assertThat(extras.map { it.extraKey }).doesNotContain("category")
+        }
+    }
+
+    // ==================== Group N: startsWith value detection ====================
+
+    @Test
+    fun `PrefixValue transport has startsWith values air sea`() {
+        val extras = extrasFor("PrefixValueActivity")
+        val transport = extras.find { it.extraKey == "transport" }
+        assertThat(transport).isNotNull()
+        assertThat(transport!!.possibleValues).containsAtLeast("air", "sea")
+    }
+
+    @Test
+    fun `PrefixValue transport type is String`() {
+        val extras = extrasFor("PrefixValueActivity")
+        val transport = extras.find { it.extraKey == "transport" }
+        assertThat(transport).isNotNull()
+        assertThat(transport!!.extraType).isEqualTo("String")
+    }
+
+    @Test
+    fun `PrefixValue transport NOT on other activities`() {
+        val otherActivities = listOf("DirectExtraActivity", "ValueScanActivity", "StringSwitchActivity")
+        for (act in otherActivities) {
+            val extras = extrasFor(act)
+            assertThat(extras.map { it.extraKey }).doesNotContain("transport")
+        }
+    }
+
+    // ==================== Group O: Inline const-string key CFG association ====================
+
+    @Test
+    fun `inline Stripe key detected as sensitive string`() {
+        val inlineKey = analysis.sensitiveStrings.find {
+            it.value.contains("InlineTestKeyForDroidProbe")
+        }
+        assertThat(inlineKey).isNotNull()
+        assertThat(inlineKey!!.category).isEqualTo("Stripe Key")
+    }
+
+    @Test
+    fun `inline Stripe key associated with payments example com`() {
+        val inlineKey = analysis.sensitiveStrings.find {
+            it.value.contains("InlineTestKeyForDroidProbe")
+        }
+        assertThat(inlineKey).isNotNull()
+        assertThat(inlineKey!!.associatedUrls).contains("https://payments.example.com/v1/charges")
+    }
+
+    @Test
+    fun `inline Stripe key NOT associated with api example com`() {
+        val inlineKey = analysis.sensitiveStrings.find {
+            it.value.contains("InlineTestKeyForDroidProbe")
+        }
+        assertThat(inlineKey).isNotNull()
+        inlineKey!!.associatedUrls.forEach { url ->
+            assertThat(url).doesNotContain("api.example.com")
+        }
+    }
+
+    // ==================== Group P: Sensitive key negative — no HTTP sink ====================
+
+    @Test
+    fun `FakeSecrets Stripe Key has no associated URLs`() {
+        val stripeKey = analysis.sensitiveStrings.find {
+            it.value.contains("sk_live_FakeStripeKey") && it.sourceClass.contains("FakeSecrets")
+        }
+        assertThat(stripeKey).isNotNull()
+        assertThat(stripeKey!!.associatedUrls).isEmpty()
+    }
+
+    @Test
+    fun `FakeSecrets JWT has no associated URLs`() {
+        val jwt = analysis.sensitiveStrings.find {
+            it.category == "JWT" && it.sourceClass.contains("FakeSecrets")
+        }
+        assertThat(jwt).isNotNull()
+        assertThat(jwt!!.associatedUrls).isEmpty()
+    }
+
+    // ==================== Group Q: Deep link param scoping ====================
+
+    @Test
+    fun `myapp deeplink home has ref param`() {
+        val uri = analysis.contentProviderUris.find {
+            it.uriPattern == "myapp://deeplink/home"
+        }
+        assertThat(uri).isNotNull()
+        assertThat(uri!!.queryParameters).contains("ref")
+    }
+
+    @Test
+    fun `customscheme action open does NOT have ref param`() {
+        val uri = analysis.contentProviderUris.find {
+            it.uriPattern == "customscheme://action/open"
+        }
+        assertThat(uri).isNotNull()
+        assertThat(uri!!.queryParameters).doesNotContain("ref")
+    }
+
+    @Test
+    fun `ref param appears on exactly one deep link URI`() {
+        val urisWithRef = analysis.contentProviderUris.filter {
+            it.queryParameters.contains("ref")
+        }
+        assertThat(urisWithRef).hasSize(1)
+        assertThat(urisWithRef.first().uriPattern).isEqualTo("myapp://deeplink/home")
+    }
+
+    // ==================== Group R: Match code isolation ====================
+
+    @Test
+    fun `DispatchProvider messages params exclude threads params`() {
+        val messageUris = urisForAuthority("$PKG.dispatch").filter {
+            it.uriPattern.contains("messages") && !it.uriPattern.contains("#")
+        }
+        val messageParams = messageUris.flatMap { it.queryParameters }.toSet()
+        assertThat(messageParams).containsNoneOf("thread_id", "page")
+    }
+
+    @Test
+    fun `DispatchProvider threads params exclude messages params`() {
+        val threadUris = urisForAuthority("$PKG.dispatch").filter {
+            it.uriPattern.contains("threads")
+        }
+        val threadParams = threadUris.flatMap { it.queryParameters }.toSet()
+        assertThat(threadParams).containsNoneOf("sender", "limit")
+    }
+
+    // ==================== Group S: sourceClass attribution ====================
+
+    @Test
+    fun `DirectExtraActivity extras have correct sourceClass`() {
+        val extras = extrasFor("DirectExtraActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { extra ->
+            assertThat(extra.sourceClass).contains("DirectExtraActivity")
+        }
+    }
+
+    @Test
+    fun `BasicProvider items URI has sourceClass containing BasicProvider`() {
+        val itemsUri = urisForAuthority("$PKG.basic").find {
+            it.uriPattern == "content://$PKG.basic/items"
+        }
+        assertThat(itemsUri).isNotNull()
+        assertThat(itemsUri!!.sourceClass).contains("BasicProvider")
+    }
+
+    @Test
+    fun `content provider call has sourceClass containing ProviderCaller`() {
+        val calls = analysis.contentProviderCalls
+        val callWithSourceClass = calls.find { it.sourceClass?.contains("ProviderCaller") == true }
+        assertThat(callWithSourceClass).isNotNull()
+    }
+
+    // ==================== Group T: FileProvider exact assertions ====================
+
+    @Test
+    fun `code-referenced FileProvider paths have exact filePath values`() {
+        val codeRefs = analysis.fileProviderPaths.filter { it.pathType == "code-reference" }
+        val fileNames = codeRefs.mapNotNull { it.filePath }
+        assertThat(fileNames).containsAtLeast("report.pdf", "data.csv", "app.log")
+    }
+
+    @Test
+    fun `XML-defined FileProvider paths have null filePath`() {
+        val xmlPaths = analysis.fileProviderPaths.filter {
+            it.pathType != "code-reference"
+        }
+        assertThat(xmlPaths).isNotEmpty()
+        xmlPaths.forEach { path ->
+            assertThat(path.filePath).isNull()
+        }
+    }
+
+    // ==================== Group U: Usability completeness checks ====================
+
+    @Test
+    fun `all exported component extras have non-null extraType`() {
+        val exported = analysis.intentExtras.filter {
+            it.associatedComponent != null
+        }
+        assertThat(exported).isNotEmpty()
+        val missingType = exported.filter { it.extraType == null }
+        assertThat(missingType).isEmpty()
+    }
+
+    @Test
+    fun `all content provider URIs have non-null authority`() {
+        val contentUris = analysis.contentProviderUris.filter {
+            it.uriPattern.startsWith("content://")
+        }
+        assertThat(contentUris).isNotEmpty()
+        contentUris.forEach { uri ->
+            assertThat(uri.authority).isNotNull()
+            assertThat(uri.authority).isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `all Retrofit endpoints have non-null httpMethod`() {
+        val retrofitEndpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        assertThat(retrofitEndpoints).isNotEmpty()
+        retrofitEndpoints.forEach { endpoint ->
+            assertThat(endpoint.httpMethod).isNotNull()
+            assertThat(endpoint.httpMethod).isNotEmpty()
+        }
+    }
+
+    // ==================== Group V: Activity alias extras ====================
+
+    @Test
+    fun `alias extras resolve to target ValueScanActivity extras`() {
+        val aliasExtras = extrasFor("SettingsAlias")
+        val targetExtras = extrasFor("ValueScanActivity")
+        // Alias should inherit extras from its target activity
+        val targetKeys = targetExtras.map { it.extraKey }.toSet()
+        val aliasKeys = aliasExtras.map { it.extraKey }.toSet()
+        assertThat(aliasKeys).isEqualTo(targetKeys)
+    }
+
+    @Test
+    fun `alias has associatedAction SETTINGS_ALIAS`() {
+        val aliasExtras = extrasFor("SettingsAlias")
+        assertThat(aliasExtras).isNotEmpty()
+        val actions = aliasExtras.mapNotNull { it.associatedAction }.toSet()
+        assertThat(actions).contains("$PKG.action.SETTINGS_ALIAS")
     }
 }

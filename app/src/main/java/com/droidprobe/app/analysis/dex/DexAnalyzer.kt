@@ -111,7 +111,16 @@ class DexAnalyzer {
         }
 
         // Resolve extras in superclasses to their component descendants
-        val resolvedExtras = intentExtractor.resolveSuperclassExtras()
+        val resolvedExtras = intentExtractor.resolveSuperclassExtras().toMutableList()
+
+        // Resolve activity-alias extras: duplicate target activity's extras to the alias
+        for (comp in manifestAnalysis.activities) {
+            if (!comp.isExported || comp.targetActivity == null) continue
+            val targetExtras = resolvedExtras.filter { it.associatedComponent == comp.targetActivity }
+            for (extra in targetExtras) {
+                resolvedExtras.add(extra.copy(associatedComponent = comp.name))
+            }
+        }
 
         // Link each extra to its component's manifest intent filter action
         val componentActionMap = mutableMapOf<String, String>()

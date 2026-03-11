@@ -41,7 +41,7 @@ The test release of DroidProbe is published after joining <https://groups.google
 1. **Manifest pass** — Reads exported components, permissions, and provider authorities via `PackageManager`, then enriches intent filters by parsing binary AndroidManifest.xml (AXML) from the APK for complete action/category/data coverage
 2. **DEX pass 1** — Builds a class hierarchy map (`class -> superclass`) from all DEX classes
 3. **DEX pass 1.5** — Pre-scans for wrapper methods that internally call `getQueryParameter`/`getBooleanQueryParameter` with a parameter-sourced key, storing argument positions for call-site resolution in pass 2
-4. **DEX pass 2** — Scans bytecode with six extractors using CFG-based forward register tracking: `UriPatternExtractor` (with UriMatcher dispatch detection), `IntentExtraExtractor`, `FileProviderExtractor` (XML + `getUriForFile` bytecode), `ContentProviderCallExtractor`, `StringConstantCollector`, `SecurityWarningExtractor`
+4. **DEX pass 2** — Scans bytecode with six extractors using CFG-based forward register tracking: `UriPatternExtractor` (with UriMatcher dispatch detection), `IntentExtraExtractor`, `FileProviderExtractor` (XML + `getUriForFile` bytecode), `ContentProviderCallExtractor`, `StringConstantCollector`
 5. **Inheritance resolution** — Maps discovered extras to exported components by walking the inheritance chain (handles inner classes, base classes, and superclass propagation)
 6. **Security analysis** — Cross-references DEX-detected patterns (WebView misconfig, intent redirection, path traversal) with exported component set to generate actionable security warnings
 7. **Interactive GUI** — Pre-populates interaction screens from analysis results, including API spec exploration for discovered endpoints
@@ -86,7 +86,6 @@ app/src/main/java/com/droidprobe/app/
 │       ├── FileProviderExtractor.kt        # FileProvider XML + getUriForFile bytecode extraction
 │       ├── ContentProviderCallExtractor.kt # ContentResolver.call() detection
 │       ├── StringConstantCollector.kt      # URL, content URI, deep link, and sensitive string collection
-│       ├── SecurityWarningExtractor.kt    # Security vulnerability pattern detection
 │       └── DexDebugLog.kt                  # Debug logger with class/param filtering
 ├── data/
 │   ├── model/                              # AppInfo, ManifestAnalysis, DexAnalysis, etc.
