@@ -3,6 +3,7 @@
 
     <!-- Required to see all installed packages on Android 11+ -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".DroidProbeApplication"

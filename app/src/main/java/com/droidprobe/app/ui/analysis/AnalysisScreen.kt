@@ -60,6 +60,7 @@ fun AnalysisScreen(
     onNavigateToContentProvider: (String) -> Unit,
     onNavigateToIntentBuilder: (String) -> Unit,
     onNavigateToFileProvider: (String) -> Unit,
+    onNavigateToGoogleApi: (String, String) -> Unit = { _, _ -> },
     viewModel: AnalysisViewModel = viewModel(
         factory = run {
             val app = LocalContext.current.applicationContext as DroidProbeApplication
@@ -239,7 +240,14 @@ fun AnalysisScreen(
                             ) {
                                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                                     sortedGroups.forEach { (host, endpoints) ->
-                                        EndpointGroupHeader(host, endpoints.size)
+                                        val isExplorable = isExplorableApi(host)
+                                        EndpointGroupHeader(
+                                            host = host,
+                                            count = endpoints.size,
+                                            onExplore = if (isExplorable) {
+                                                { onNavigateToGoogleApi(packageName, host) }
+                                            } else null
+                                        )
                                         endpoints.sortedBy { it.path }.forEach { endpoint ->
                                             EndpointRow(endpoint)
                                         }
@@ -433,7 +441,11 @@ private fun classifyDomain(baseUrl: String): DomainClassification? {
 }
 
 @Composable
-private fun EndpointGroupHeader(host: String, count: Int) {
+private fun EndpointGroupHeader(
+    host: String,
+    count: Int,
+    onExplore: (() -> Unit)? = null
+) {
     val classification = classifyDomain(host)
     Row(
         modifier = Modifier
@@ -450,6 +462,21 @@ private fun EndpointGroupHeader(host: String, count: Int) {
             modifier = Modifier.weight(1f)
         )
         Spacer(modifier = Modifier.width(6.dp))
+        if (onExplore != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small,
+                onClick = onExplore
+            ) {
+                Text(
+                    text = "Explore",
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = MaterialTheme.shapes.small
@@ -476,6 +503,21 @@ private fun EndpointGroupHeader(host: String, count: Int) {
             }
         }
     }
+}
+
+private fun isExplorableApi(baseUrl: String): Boolean {
+    val host = baseUrl.removePrefix("https://").removePrefix("http://")
+        .substringBefore('/').substringBefore(':').lowercase()
+    // Skip known non-API hosts (CDNs, analytics, ad networks)
+    if (host.isEmpty()) return false
+    val skipPatterns = listOf(
+        "cloudfront.net", "cloudflare.com", "akamai", "fastly.net",
+        "firebaseinstallations", "firebaselogging", "crashlytics",
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "app-measurement.com", "google-analytics.com"
+    )
+    if (skipPatterns.any { host.contains(it) }) return false
+    return true
 }
 
 @Composable

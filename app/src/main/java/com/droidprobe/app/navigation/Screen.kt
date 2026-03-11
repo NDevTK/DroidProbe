@@ -18,4 +18,7 @@ sealed interface Screen {
 
     @Serializable
     data class FileProviderBrowser(val packageName: String) : Screen
+
+    @Serializable
+    data class GoogleApiExplorer(val packageName: String, val rootUrl: String) : Screen
 }

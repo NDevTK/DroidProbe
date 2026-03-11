@@ -7,6 +7,7 @@ import com.droidprobe.app.analysis.manifest.ManifestAnalyzer
 import com.droidprobe.app.data.db.DroidProbeDatabase
 import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.data.repository.AppRepository
+import com.droidprobe.app.interaction.ApiSpecFetcher
 import com.droidprobe.app.scanner.PackageScanner
 
 class AppModule(private val appContext: Context) {
@@ -33,6 +34,10 @@ class AppModule(private val appContext: Context) {
 
     val appRepository: AppRepository by lazy {
         AppRepository(packageScanner)
+    }
+
+    val apiSpecFetcher: ApiSpecFetcher by lazy {
+        ApiSpecFetcher()
     }
 
     val analysisRepository: AnalysisRepository by lazy {

@@ -9,6 +9,7 @@ import com.droidprobe.app.ui.analysis.AnalysisScreen
 import com.droidprobe.app.ui.fileprovider.FileProviderScreen
 import com.droidprobe.app.ui.intents.IntentBuilderScreen
 import com.droidprobe.app.ui.providers.ContentProviderScreen
+import com.droidprobe.app.ui.googleapi.GoogleApiExplorerScreen
 import com.droidprobe.app.ui.scanner.AppListScreen
 
 @Composable
@@ -40,6 +41,9 @@ fun DroidProbeNavGraph() {
                 },
                 onNavigateToFileProvider = { pkg ->
                     navController.navigate(Screen.FileProviderBrowser(pkg))
+                },
+                onNavigateToGoogleApi = { pkg, rootUrl ->
+                    navController.navigate(Screen.GoogleApiExplorer(pkg, rootUrl))
                 }
             )
         }
@@ -64,6 +68,15 @@ fun DroidProbeNavGraph() {
             val route = backStackEntry.toRoute<Screen.FileProviderBrowser>()
             FileProviderScreen(
                 packageName = route.packageName,
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        composable<Screen.GoogleApiExplorer> { backStackEntry ->
+            val route = backStackEntry.toRoute<Screen.GoogleApiExplorer>()
+            GoogleApiExplorerScreen(
+                packageName = route.packageName,
+                rootUrl = route.rootUrl,
                 onNavigateBack = { navController.popBackStack() }
             )
         }
