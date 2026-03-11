@@ -177,9 +177,9 @@ class IntentExtraExtractor(
             if (ref !is MethodReference) continue
 
             when {
-                isIntentGetExtra(ref) -> handleGetExtra(ref, instructions, i, classDef, method, cfgStrings)
+                isIntentGetExtra(ref) -> handleGetExtra(ref, instructions, i, classDef, method, cfgStrings, cfg.successors)
                 isIntentPutExtra(ref) -> handlePutExtra(ref, instructions, i, classDef, method, cfgStrings)
-                isBundleGet(ref) -> handleBundleGet(ref, instructions, i, classDef, method, cfgStrings)
+                isBundleGet(ref) -> handleBundleGet(ref, instructions, i, classDef, method, cfgStrings, cfg.successors)
                 isBundlePut(ref) -> handleBundlePut(ref, instructions, i, classDef, method, cfgStrings)
                 isSetAction(ref) -> handleSetAction(instructions, i, cfgStrings)
             }
@@ -225,7 +225,8 @@ class IntentExtraExtractor(
         callIndex: Int,
         classDef: DexBackedClassDef,
         method: DexBackedMethod,
-        cfgStrings: Array<Map<Int, String>?>
+        cfgStrings: Array<Map<Int, String>?>,
+        successors: Array<IntArray>
     ) {
         val type = getExtraTypeMap[ref.name] ?: "Unknown"
         val instr = instructions[callIndex] as? Instruction35c ?: return
@@ -243,22 +244,22 @@ class IntentExtraExtractor(
 
         if (resultReg != null) {
             if (ref.name in stringResultTypes) {
-                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, window = 25)
+                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, successors)
                 values.addAll(scan.values)
                 // Chain: if parseInt detected on string result, scan for int values + enum
                 if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
-                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
-                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg, successors))
+                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg, successors))
                 }
                 // Inter-procedural: follow string extra into called methods
                 if (values.isEmpty()) {
                     values.addAll(ForwardValueScanner.resolveStringEnumValues(
-                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings
+                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings, successors
                     ))
                 }
             } else if (ref.name in intResultTypes) {
-                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
-                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg))
+                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, successors))
+                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg, successors))
             }
         }
 
@@ -273,7 +274,7 @@ class IntentExtraExtractor(
         method: DexBackedMethod,
         cfgStrings: Array<Map<Int, String>?>
     ) {
-        val paramSig = ref.parameterTypes.joinToString(",", "(", ")")
+        val paramSig = ref.parameterTypes.joinToString("", "(", ")")
         val type = putExtraTypeMap.entries.find { (sig, _) ->
             paramSig.contains(sig.substringAfter("(").substringBefore(")"))
         }?.value ?: "Unknown"
@@ -302,7 +303,8 @@ class IntentExtraExtractor(
         callIndex: Int,
         classDef: DexBackedClassDef,
         method: DexBackedMethod,
-        cfgStrings: Array<Map<Int, String>?>
+        cfgStrings: Array<Map<Int, String>?>,
+        successors: Array<IntArray>
     ) {
         val type = inferTypeFromBundleMethodName(ref.name, "get")
         val instr = instructions[callIndex] as? Instruction35c ?: return
@@ -312,20 +314,20 @@ class IntentExtraExtractor(
         val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, callIndex)
         if (resultReg != null) {
             if (type == "String") {
-                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, window = 25)
+                val scan = ForwardValueScanner.scanStringValues(instructions, callIndex + 2, resultReg, cfgStrings, successors)
                 values.addAll(scan.values)
                 if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
-                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
-                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                    values.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg, successors))
+                    values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg, successors))
                 }
                 if (values.isEmpty()) {
                     values.addAll(ForwardValueScanner.resolveStringEnumValues(
-                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings
+                        classIndex, instructions, callIndex + 2, resultReg, cfgStrings, successors
                     ))
                 }
             } else if (type in listOf("Int", "Short", "Byte")) {
-                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, window = 20))
-                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg))
+                values.addAll(ForwardValueScanner.scanIntValues(instructions, callIndex + 2, resultReg, successors))
+                values.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, callIndex + 2, resultReg, successors))
             }
         }
 

@@ -31,4 +31,14 @@ class FileHelper(private val context: Context) {
         )
         uri.toString()
     }
+
+    fun shareLog() {
+        val logFile = File("/data/logs", "app.log")
+        val uri = FileProvider.getUriForFile(
+            context,
+            "com.droidprobe.testapp.fileprovider",
+            logFile
+        )
+        uri.toString()
+    }
 }

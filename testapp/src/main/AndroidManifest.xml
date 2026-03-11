@@ -77,6 +77,38 @@
             </intent-filter>
         </activity>
 
+        <!-- === Activity Alias === -->
+
+        <activity-alias
+            android:name=".activities.SettingsAlias"
+            android:targetActivity=".activities.ValueScanActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.SETTINGS_ALIAS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- === Broadcast Receivers === -->
+
+        <receiver
+            android:name=".receivers.DataReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.DATA" />
+            </intent-filter>
+        </receiver>
+
+        <!-- === Services === -->
+
+        <service
+            android:name=".services.SyncService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.SYNC" />
+            </intent-filter>
+        </service>
+
         <!-- === Content Providers === -->
 
         <provider

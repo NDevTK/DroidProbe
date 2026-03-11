@@ -11,6 +11,8 @@ class OkHttpCaller {
     fun fetchExport(): Request {
         return Request.Builder()
             .url("https://api.example.com/data/export")
+            .addHeader("X-Api-Key", "somekey")
+            .addHeader("Accept", "application/json")
             .build()
     }
 

@@ -246,14 +246,14 @@ class UriPatternExtractor(
                             // Scan forward for type conversions and value comparisons
                             val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
                             if (resultReg != null) {
-                                val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, window = 40)
+                                val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, cfg.successors)
                                 if (scan.detectedType != null) mapGetParamTypes[key] = scan.detectedType
                                 if (scan.values.isNotEmpty()) mapGetParamValues.getOrPut(key) { mutableSetOf() }.addAll(scan.values)
                                 // If parseInt detected, scan for int values locally + inter-procedurally (enum)
                                 if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
                                     val vals = mapGetParamValues.getOrPut(key) { mutableSetOf() }
-                                    vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
-                                    vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                                    vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg, cfg.successors))
+                                    vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg, cfg.successors))
                                 }
                                 if (scan.storedToField != null) {
                                     mapGetFieldMap[scan.storedToField] = key
@@ -278,7 +278,7 @@ class UriPatternExtractor(
             }
 
             // Field tracking: find iget-object reads of stored fields → forward-scan for values
-            scanFieldReadsForValues(instructions, cfgStrings, mapGetFieldMap, mapGetParamValues, mapGetParamTypes)
+            scanFieldReadsForValues(instructions, cfgStrings, mapGetFieldMap, mapGetParamValues, mapGetParamTypes, cfg.successors)
 
             // Build reconstructed URI
             val reconstructedUri = if (detectedScheme != null && detectedHost != null) {
@@ -331,13 +331,17 @@ class UriPatternExtractor(
             val isStaticEquals = ref.name == "equals" &&
                 ref.parameterTypes.size == 2 &&
                 (ref.definingClass.endsWith("/Objects;") || ref.definingClass == "Ljava/util/Objects;")
+            // Kotlin == compiles to Intrinsics.areEqual(Object, Object)
+            val isKotlinEquals = ref.name == "areEqual" &&
+                ref.parameterTypes.size == 2 &&
+                ref.definingClass == "Lkotlin/jvm/internal/Intrinsics;"
 
-            if (!isInstanceEquals && !isStaticEquals) continue
+            if (!isInstanceEquals && !isStaticEquals && !isKotlinEquals) continue
 
             val regStrings = cfgStrings[i] ?: continue
 
-            if (isStaticEquals) {
-                // invoke-static {a, b}, Objects.equals(Object, Object)Z
+            if (isStaticEquals || isKotlinEquals) {
+                // invoke-static {a, b}, Objects.equals/Intrinsics.areEqual(Object, Object)Z
                 // Both registerC and registerD are arguments
                 if (instr.registerC == resultReg) {
                     val compared = regStrings[instr.registerD]
@@ -438,7 +442,8 @@ class UriPatternExtractor(
         cfgStrings: Array<Map<Int, String>?>,
         fieldParamMap: Map<String, String>,
         paramValues: MutableMap<String, MutableSet<String>>,
-        paramTypes: MutableMap<String, String>
+        paramTypes: MutableMap<String, String>,
+        successors: Array<IntArray>
     ) {
         if (fieldParamMap.isEmpty()) return
         for ((i, instr) in instructions.withIndex()) {
@@ -451,7 +456,7 @@ class UriPatternExtractor(
 
             val readReg = instr.registerA
             val scan = ForwardValueScanner.scanStringValues(
-                instructions, i + 1, readReg, cfgStrings, window = 30
+                instructions, i + 1, readReg, cfgStrings, successors
             )
             if (scan.values.isNotEmpty()) {
                 paramValues.getOrPut(paramKey) { mutableSetOf() }.addAll(scan.values)
@@ -500,13 +505,13 @@ class UriPatternExtractor(
                         keys.add(key)
                         val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
                         if (resultReg != null) {
-                            val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, window = 40)
+                            val scan = ForwardValueScanner.scanStringValues(instructions, i + 2, resultReg, cfgStrings, cfg.successors)
                             if (scan.detectedType != null) detectedParamTypes[key] = scan.detectedType
                             if (scan.values.isNotEmpty()) detectedParamValues.getOrPut(key) { mutableSetOf() }.addAll(scan.values)
                             if (scan.detectedType == "int" && scan.convertedResultReg != null && scan.convertedResultIndex != null) {
                                 val vals = detectedParamValues.getOrPut(key) { mutableSetOf() }
-                                vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg))
-                                vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg))
+                                vals.addAll(ForwardValueScanner.scanIntValues(instructions, scan.convertedResultIndex, scan.convertedResultReg, cfg.successors))
+                                vals.addAll(ForwardValueScanner.resolveEnumValues(classIndex, instructions, scan.convertedResultIndex, scan.convertedResultReg, cfg.successors))
                             }
                             if (scan.storedToField != null) {
                                 fieldParamMap[scan.storedToField] = key
@@ -517,7 +522,7 @@ class UriPatternExtractor(
             }
 
             // Field tracking: find iget-object reads of stored fields → forward-scan for values
-            scanFieldReadsForValues(instructions, cfgStrings, fieldParamMap, detectedParamValues, detectedParamTypes)
+            scanFieldReadsForValues(instructions, cfgStrings, fieldParamMap, detectedParamValues, detectedParamTypes, cfg.successors)
         }
 
         if (keys.isEmpty()) return
@@ -707,9 +712,11 @@ class UriPatternExtractor(
         val regInts = mutableMapOf<Int, Int>()
 
         // Strategy 7: Deep link URI detection from manual getScheme/getHost/getPath validation
-        val deepLinkSchemes = mutableSetOf<String>()
-        val deepLinkHosts = mutableSetOf<String>()
-        val deepLinkPaths = mutableSetOf<String>()
+        // Track each component value with its comparison index and matched continuation,
+        // so we can use gated CFG BFS to build only valid scheme→host→path combinations.
+        val deepLinkSchemes = mutableListOf<DeepLinkComponent>()
+        val deepLinkHosts = mutableListOf<DeepLinkComponent>()
+        val deepLinkPaths = mutableListOf<DeepLinkComponent>()
 
         for ((i, instr) in instructions.withIndex()) {
             trackIntRegisters(instr, regInts)
@@ -725,7 +732,7 @@ class UriPatternExtractor(
                 isUriMatcherAddUri(ref) -> handleAddUri(regStrings, regInts, instr, classDef, method)
                 isUriParse(ref) -> handleUriParse(regStrings, instr, classDef, method)
                 isContentUrisWithAppendedId(ref) -> handleContentUris(regStrings, instr, classDef, method)
-                isGetQueryParameter(ref) -> handleGetQueryParameter(ref, regStrings, instr, instructions, i, classDef, cfgStrings, matchDispatch)
+                isGetQueryParameter(ref) -> handleGetQueryParameter(ref, regStrings, instr, instructions, i, classDef, cfgStrings, matchDispatch, cfg.successors)
                 isGetBooleanQueryParameter(ref) -> handleGetBooleanQueryParameter(regStrings, regInts, instr, i, classDef, matchDispatch)
                 else -> handleWrapperCallSite(ref, regStrings, regInts, instr, i, classDef, matchDispatch)
             }
@@ -736,14 +743,14 @@ class UriPatternExtractor(
             ) {
                 val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, i)
                 if (resultReg != null) {
-                    val values = collectDeepLinkComponentValues(instructions, i + 2, resultReg, cfgStrings)
+                    val components = collectDeepLinkComponents(instructions, i + 2, resultReg, cfgStrings, cfg.successors)
                     when (ref.name) {
-                        "getPath" -> deepLinkPaths.addAll(values)
+                        "getPath" -> deepLinkPaths.addAll(components)
                         "getHost" -> {
-                            deepLinkHosts.addAll(values)
-                            validatedHostsByClass.getOrPut(classDef.type) { mutableSetOf() }.addAll(values)
+                            deepLinkHosts.addAll(components)
+                            validatedHostsByClass.getOrPut(classDef.type) { mutableSetOf() }.addAll(components.map { it.value })
                         }
-                        "getScheme" -> deepLinkSchemes.addAll(values)
+                        "getScheme" -> deepLinkSchemes.addAll(components)
                     }
                 }
             }
@@ -769,17 +776,78 @@ class UriPatternExtractor(
             }
         }
 
-        // Construct deep link URIs from detected scheme/host/path validation
+        // Construct deep link URIs from detected scheme/host/path validation.
+        // Use gated CFG BFS to pair components: at each deep link comparison's
+        // conditional branch, only follow the "matched" successor. This prevents
+        // leaking through unmatched branches into unrelated if-blocks.
         if (deepLinkHosts.isNotEmpty() && deepLinkPaths.isNotEmpty()) {
-            val scheme = deepLinkSchemes.firstOrNull() ?: "https"
-            for (host in deepLinkHosts) {
-                if (!host.contains('.')) continue
-                for (path in deepLinkPaths) {
-                    if (!path.startsWith('/')) continue
-                    addResult("$scheme://$host$path", null, classDef, method.name)
+            // Build gating map: IF instruction index → matched successor only
+            val allComponents = deepLinkSchemes + deepLinkHosts + deepLinkPaths
+            val gatingMap = mutableMapOf<Int, Int>()
+            for (comp in allComponents) {
+                if (comp.ifIndex >= 0) {
+                    gatingMap[comp.ifIndex] = comp.matchedContinuation
+                }
+            }
+
+            for (scheme in deepLinkSchemes.ifEmpty { listOf(DeepLinkComponent("https", -1, -1, -1)) }) {
+                val associatedHosts = if (scheme.matchedContinuation >= 0) {
+                    deepLinkHosts.filter { host ->
+                        gatedBfsReachable(scheme.matchedContinuation, host.comparisonIndex, cfg.successors, gatingMap)
+                    }.ifEmpty { deepLinkHosts }
+                } else {
+                    deepLinkHosts
+                }
+
+                for (host in associatedHosts) {
+                    if (!host.value.contains('.') && (scheme.value == "http" || scheme.value == "https")) continue
+
+                    val associatedPaths = if (host.matchedContinuation >= 0) {
+                        deepLinkPaths.filter { path ->
+                            gatedBfsReachable(host.matchedContinuation, path.comparisonIndex, cfg.successors, gatingMap)
+                        }.ifEmpty { deepLinkPaths }
+                    } else {
+                        deepLinkPaths
+                    }
+
+                    for (path in associatedPaths) {
+                        if (!path.value.startsWith('/')) continue
+                        addResult("${scheme.value}://${host.value}${path.value}", null, classDef, method.name)
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * Gated BFS: check if [target] is reachable from [source] via CFG, but at gated IF
+     * instructions (deep link comparisons), only follow the matched continuation successor.
+     * This prevents the BFS from leaking through unmatched branches into unrelated if-blocks.
+     */
+    private fun gatedBfsReachable(
+        source: Int, target: Int,
+        successors: Array<IntArray>,
+        gatingMap: Map<Int, Int>
+    ): Boolean {
+        if (source == target) return true
+        val visited = mutableSetOf(source)
+        val queue = ArrayDeque<Int>()
+        queue.add(source)
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            val gatedSuccessor = gatingMap[current]
+            if (gatedSuccessor != null) {
+                // At a gated IF, only follow the matched continuation
+                if (gatedSuccessor == target) return true
+                if (visited.add(gatedSuccessor)) queue.add(gatedSuccessor)
+            } else {
+                for (next in successors[current]) {
+                    if (next == target) return true
+                    if (visited.add(next)) queue.add(next)
+                }
+            }
+        }
+        return false
     }
 
     /**
@@ -798,39 +866,154 @@ class UriPatternExtractor(
     private val DEEP_LINK_COMPONENT_METHODS = setOf("getPath", "getHost", "getScheme")
 
     /**
-     * Forward-scan for string comparisons on a URI component result register.
-     * Returns raw compared values (e.g., "/gasearch", "www.google.com", "https").
+     * A deep link component comparison (scheme, host, or path) with its bytecode location
+     * and the matched continuation — the first instruction in the "comparison succeeded" block.
      */
-    private fun collectDeepLinkComponentValues(
+    private data class DeepLinkComponent(
+        val value: String,
+        val comparisonIndex: Int,
+        val ifIndex: Int,
+        val matchedContinuation: Int
+    )
+
+    /**
+     * Forward-scan via CFG BFS for string comparisons (equals/areEqual) on a URI component
+     * result register. For each comparison found, also locates the subsequent IF_EQZ/IF_NEZ
+     * and determines the matched continuation — the branch taken when the comparison succeeds.
+     */
+    private fun collectDeepLinkComponents(
         instructions: List<Instruction>,
         startIndex: Int,
         componentReg: Int,
-        cfgStrings: Array<Map<Int, String>?>
-    ): List<String> {
-        val values = mutableListOf<String>()
-        val limit = minOf(instructions.size, startIndex + 20)
-        for (i in startIndex until limit) {
-            val instr = instructions[i]
-            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
-            val ref = instr.reference
-            if (ref !is MethodReference) continue
-            val regStrings = cfgStrings[i] ?: continue
-
-            val isEquals = (ref.definingClass == "Ljava/lang/String;" &&
-                    (ref.name == "equals" || ref.name == "equalsIgnoreCase")) ||
-                    (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") ||
-                    (ref.name == "equals" && ref.parameterTypes.size == 2 &&
-                            ref.definingClass.endsWith("/Objects;"))
-            if (!isEquals) continue
-
-            val value = when {
-                instr.registerC == componentReg -> regStrings[instr.registerD]
-                instr.registerD == componentReg -> regStrings[instr.registerC]
-                else -> null
-            }
-            if (value != null) values.add(value)
+        cfgStrings: Array<Map<Int, String>?>,
+        successors: Array<IntArray>
+    ): List<DeepLinkComponent> {
+        val components = mutableListOf<DeepLinkComponent>()
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
+        if (startIndex < instructions.size) {
+            visited.add(startIndex)
+            queue.add(startIndex)
         }
-        return values
+        var reg = componentReg
+
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
+            val instr = instructions[i]
+
+            // Track move-object register renames
+            if (instr.opcode == Opcode.MOVE_OBJECT || instr.opcode == Opcode.MOVE_OBJECT_16 ||
+                instr.opcode == Opcode.MOVE_OBJECT_FROM16
+            ) {
+                val twoReg = instr as? TwoRegisterInstruction
+                if (twoReg != null && twoReg.registerB == reg) {
+                    reg = twoReg.registerA
+                }
+            }
+
+            // Stop following this path if register is overwritten by non-comparison
+            if (instr is OneRegisterInstruction && instr.registerA == reg &&
+                instr.opcode != Opcode.MOVE_OBJECT && instr.opcode != Opcode.MOVE_OBJECT_16 &&
+                instr.opcode != Opcode.MOVE_OBJECT_FROM16
+            ) {
+                if (instr !is ReferenceInstruction) continue
+            }
+
+            if (instr is ReferenceInstruction && instr is Instruction35c) {
+                val ref = instr.reference
+                if (ref is MethodReference) {
+                    val regStrings = cfgStrings[i] ?: emptyMap()
+
+                    val isComparison = (ref.definingClass == "Lkotlin/jvm/internal/Intrinsics;" &&
+                            ref.name == "areEqual" && ref.parameterTypes.size == 2) ||
+                            (ref.definingClass == "Ljava/lang/String;" &&
+                                    (ref.name == "equals" || ref.name == "equalsIgnoreCase")) ||
+                            (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") ||
+                            (ref.name == "equals" && ref.parameterTypes.size == 2 &&
+                                    ref.definingClass.endsWith("/Objects;"))
+
+                    if (isComparison) {
+                        val value = when {
+                            instr.registerC == reg -> regStrings[instr.registerD]
+                            instr.registerD == reg -> regStrings[instr.registerC]
+                            else -> null
+                        }
+                        if (value != null) {
+                            val ifInfo = findMatchedContinuation(i, instructions, successors)
+                            components.add(DeepLinkComponent(
+                                value = value,
+                                comparisonIndex = i,
+                                ifIndex = ifInfo?.first ?: -1,
+                                matchedContinuation = ifInfo?.second ?: -1
+                            ))
+                        }
+                    }
+                }
+            }
+
+            // Enqueue CFG successors
+            for (s in successors[i]) {
+                if (visited.add(s)) queue.add(s)
+            }
+        }
+        return components
+    }
+
+    /**
+     * After a comparison (areEqual/equals) at [comparisonIndex], find the subsequent
+     * IF_EQZ or IF_NEZ that branches on the result, and determine the matched continuation
+     * (the first instruction when the comparison succeeded).
+     *
+     * For IF_EQZ: matched = fall-through (value was non-zero = areEqual returned true)
+     * For IF_NEZ: matched = jump target (value was non-zero = areEqual returned true)
+     *
+     * Returns (ifIndex, matchedContinuation) or null if the pattern isn't found.
+     */
+    private fun findMatchedContinuation(
+        comparisonIndex: Int,
+        instructions: List<Instruction>,
+        successors: Array<IntArray>
+    ): Pair<Int, Int>? {
+        if (comparisonIndex + 1 >= instructions.size) return null
+        val moveResult = instructions[comparisonIndex + 1]
+        if (moveResult.opcode != Opcode.MOVE_RESULT) return null
+        val resultReg = (moveResult as? OneRegisterInstruction)?.registerA ?: return null
+
+        // BFS from comparisonIndex+2 to find IF_EQZ/IF_NEZ on resultReg
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
+        val start = comparisonIndex + 2
+        if (start < instructions.size) {
+            visited.add(start)
+            queue.add(start)
+        }
+        while (queue.isNotEmpty()) {
+            val j = queue.removeFirst()
+            val instr = instructions[j]
+
+            if (instr is OneRegisterInstruction && instr.registerA == resultReg) {
+                when (instr.opcode) {
+                    Opcode.IF_EQZ -> {
+                        // Fall-through = matched (areEqual returned non-zero/true)
+                        return j to (j + 1)
+                    }
+                    Opcode.IF_NEZ -> {
+                        // Jump target = matched (areEqual returned non-zero/true)
+                        val jumpTarget = successors[j].firstOrNull { it != j + 1 }
+                        return if (jumpTarget != null) j to jumpTarget else null
+                    }
+                    else -> {
+                        // Result register overwritten by something else — stop this path
+                        if (instr.opcode.setsRegister()) continue
+                    }
+                }
+            }
+
+            for (s in successors[j]) {
+                if (visited.add(s)) queue.add(s)
+            }
+        }
+        return null
     }
 
     // --- Strategy 1: UriMatcher.addURI ---
@@ -951,7 +1134,8 @@ class UriPatternExtractor(
         callIndex: Int,
         classDef: DexBackedClassDef,
         cfgStrings: Array<Map<Int, String>?>,
-        matchDispatch: MatchDispatchInfo?
+        matchDispatch: MatchDispatchInfo?,
+        successors: Array<IntArray>
     ) {
         if (instr !is Instruction35c) return
         val paramName = regStrings[instr.registerD] ?: return
@@ -974,7 +1158,7 @@ class UriPatternExtractor(
         val values = if (isPlural) {
             scanForwardForListElementValues(instructions, callIndex + 2, resultReg, cfgStrings, classDef.type, paramName)
         } else {
-            scanForwardForStringValues(instructions, callIndex + 2, resultReg, cfgStrings).values
+            scanForwardForStringValues(instructions, callIndex + 2, resultReg, cfgStrings, successors).values
         }
 
         if (matchCodes.isNotEmpty()) {
@@ -1157,9 +1341,9 @@ class UriPatternExtractor(
         startIndex: Int,
         resultReg: Int,
         cfgStrings: Array<Map<Int, String>?>,
-        window: Int = 30
+        successors: Array<IntArray>
     ): ForwardValueScanner.ValueScanResult {
-        return ForwardValueScanner.scanStringValues(instructions, startIndex, resultReg, cfgStrings, window)
+        return ForwardValueScanner.scanStringValues(instructions, startIndex, resultReg, cfgStrings, successors)
     }
 
     /**
@@ -1404,8 +1588,15 @@ class UriPatternExtractor(
         queryParameters: List<String> = emptyList(),
         queryParameterValues: Map<String, List<String>> = emptyMap()
     ) {
-        // Exact string dedup
-        if (uri in seenUris) return
+        // Exact string dedup — but allow replacement when new entry is richer
+        if (uri in seenUris) {
+            // Replace bare entry (no matchCode, no params) with richer one
+            if (matchCode != null || queryParameters.isNotEmpty()) {
+                results.removeAll { it.uriPattern == uri && it.matchCode == null && it.queryParameters.isEmpty() }
+            } else {
+                return
+            }
+        }
 
         // Safe wildcard dedup: only when both URIs share the same non-null match code
         // (proving they go to the same handler). E.g. alarm/#/view and alarm/*/view

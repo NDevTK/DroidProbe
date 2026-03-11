@@ -113,6 +113,17 @@ class DexAnalyzer {
         // Resolve extras in superclasses to their component descendants
         val resolvedExtras = intentExtractor.resolveSuperclassExtras()
 
+        // Link each extra to its component's manifest intent filter action
+        val componentActionMap = mutableMapOf<String, String>()
+        for (comp in manifestAnalysis.activities + manifestAnalysis.receivers + manifestAnalysis.services) {
+            val action = comp.intentFilters.flatMap { it.actions }.firstOrNull() ?: continue
+            componentActionMap[comp.name] = action
+        }
+        val extrasWithActions = resolvedExtras.map { extra ->
+            val action = extra.associatedComponent?.let { componentActionMap[it] }
+            if (action != null) extra.copy(associatedAction = action) else extra
+        }
+
         val uriResults = uriExtractor.getResults().toMutableList()
 
         // --- Post-process: Propagate orphaned query params from helper classes ---
@@ -122,7 +133,8 @@ class DexAnalyzer {
         val orphanedParams = uriExtractor.getOrphanedParamsByClass()
         if (orphanedParams.isNotEmpty()) {
             val existingSourceClasses = uriResults.map { it.sourceClass }.toSet()
-            for (comp in manifestAnalysis.activities) {
+            val allComponents = manifestAnalysis.activities + manifestAnalysis.receivers + manifestAnalysis.services
+            for (comp in allComponents) {
                 if (!comp.isExported) continue
 
                 val compSmali = "L${comp.name.replace('.', '/')};"
@@ -146,11 +158,13 @@ class DexAnalyzer {
                     scanSmali, classHierarchy, classIndex
                 )
 
-                // Collect orphaned params from referenced helper classes
+                // Collect orphaned params from the component itself and referenced helper classes
                 val params = mutableSetOf<String>()
                 val paramValues = mutableMapOf<String, MutableSet<String>>()
                 val paramDefaults = mutableMapOf<String, String>()
-                for (refClass in referencedClasses) {
+                // Include the component's own class (activities that call getQueryParameter directly)
+                val classesToCheck = referencedClasses + setOfNotNull(compSmali, scanSmali)
+                for (refClass in classesToCheck) {
                     val orphaned = orphanedParams[refClass] ?: continue
                     params.addAll(orphaned.params)
                     orphaned.values.forEach { (k, v) ->
@@ -199,7 +213,8 @@ class DexAnalyzer {
         // match orphaned params to components by comparing validated URI hosts.
         if (orphanedParams.isNotEmpty()) {
             val validatedHosts = uriExtractor.getValidatedHostsByClass()
-            for (comp in manifestAnalysis.activities) {
+            val allComponents2 = manifestAnalysis.activities + manifestAnalysis.receivers + manifestAnalysis.services
+            for (comp in allComponents2) {
                 if (!comp.isExported) continue
 
                 val compSmali = "L${comp.name.replace('.', '/')};"
@@ -309,7 +324,7 @@ class DexAnalyzer {
         DexAnalysis(
             packageName = manifestAnalysis.packageName,
             contentProviderUris = uriResults,
-            intentExtras = resolvedExtras,
+            intentExtras = extrasWithActions,
             fileProviderPaths = fileProviderExtractor.getResults(),
             rawContentUriStrings = stringCollector.getContentUriStrings(),
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),

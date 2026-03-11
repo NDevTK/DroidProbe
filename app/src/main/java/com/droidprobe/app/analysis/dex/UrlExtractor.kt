@@ -6,6 +6,8 @@ import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction35c
 import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction3rc
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference
+import com.android.tools.smali.dexlib2.iface.value.ArrayEncodedValue
 import com.android.tools.smali.dexlib2.iface.value.StringEncodedValue
 import com.droidprobe.app.data.model.ApiEndpoint
 
@@ -19,8 +21,10 @@ import com.droidprobe.app.data.model.ApiEndpoint
 class UrlExtractor(
     private val classIndex: Map<String, DexBackedClassDef>
 ) {
-    // Retrofit base URLs discovered in Pass 1.5 (class → baseUrl)
+    // Retrofit base URLs discovered in Pass 1.5 (builder class → baseUrl)
     private val retrofitBaseUrls = mutableMapOf<String, String>()
+    // Retrofit interface → baseUrl mapping (from create() call analysis)
+    private val retrofitInterfaceBaseUrls = mutableMapOf<String, String>()
 
     // All discovered endpoints, keyed by fullUrl|sourceClass for dedup
     private val endpoints = mutableMapOf<String, ApiEndpoint>()
@@ -46,6 +50,7 @@ class UrlExtractor(
 
     /**
      * Pass 1.5: Pre-scan for Retrofit.Builder.baseUrl() calls to discover base URLs.
+     * Also detects Retrofit.create(Class) to link interfaces to their base URLs.
      */
     fun preScanRetrofitBuilders(classDef: DexBackedClassDef) {
         val className = classDef.type
@@ -56,6 +61,10 @@ class UrlExtractor(
 
             val cfg = MethodCFG(instructions, impl.tryBlocks)
             val stringRegs = cfg.computeStringRegisters()
+
+            // Per-method: track the baseUrl and create() target for linking
+            var methodBaseUrl: String? = null
+            var methodCreateTarget: String? = null
 
             for ((i, instr) in instructions.withIndex()) {
                 if (instr !is ReferenceInstruction) continue
@@ -69,8 +78,40 @@ class UrlExtractor(
                     val argReg = getFirstArgReg(instr) ?: continue
                     val url = stringRegs[i]?.get(argReg) ?: continue
                     retrofitBaseUrls[className] = url
+                    methodBaseUrl = url
                     DexDebugLog.log("[UrlExtractor] Retrofit baseUrl in $className: $url")
                 }
+
+                // Retrofit.create(Class) — resolve the interface class from const-class
+                if (ref.definingClass == "Lretrofit2/Retrofit;" &&
+                    ref.name == "create" &&
+                    ref.parameterTypes.size == 1
+                ) {
+                    // Look backward for const-class instruction to find the interface type
+                    val argReg = getFirstArgReg(instr)
+                    if (argReg != null) {
+                        for (j in i - 1 downTo maxOf(0, i - 5)) {
+                            val prev = instructions[j]
+                            if (prev.opcode == com.android.tools.smali.dexlib2.Opcode.CONST_CLASS &&
+                                prev is com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction &&
+                                prev.registerA == argReg &&
+                                prev is ReferenceInstruction
+                            ) {
+                                val typeRef = prev.reference
+                                if (typeRef is TypeReference) {
+                                    methodCreateTarget = typeRef.type
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Link the interface to the base URL found in the same method
+            if (methodBaseUrl != null && methodCreateTarget != null) {
+                retrofitInterfaceBaseUrls[methodCreateTarget] = methodBaseUrl
+                DexDebugLog.log("[UrlExtractor] Retrofit interface $methodCreateTarget → $methodBaseUrl")
             }
         }
     }
@@ -135,12 +176,39 @@ class UrlExtractor(
 
             if (path == null) continue
 
-            // Scan parameter annotations for @Query, @Path, @Header, @Body, @Field
+            // Scan method-level @Headers annotation for static headers
             val queryParams = mutableListOf<String>()
             val pathParams = mutableListOf<String>()
             val headerParams = mutableListOf<String>()
             var hasBody = false
 
+            for (annotation in method.annotations) {
+                if (annotation.type == "Lretrofit2/http/Headers;") {
+                    for (element in annotation.elements) {
+                        if (element.name == "value") {
+                            val value = element.value
+                            if (value is ArrayEncodedValue) {
+                                for (item in value.value) {
+                                    if (item is StringEncodedValue) {
+                                        // Format: "Header-Name: value"
+                                        val headerName = item.value.substringBefore(':').trim()
+                                        if (headerName.isNotEmpty()) {
+                                            headerParams.add(headerName)
+                                        }
+                                    }
+                                }
+                            } else if (value is StringEncodedValue) {
+                                val headerName = value.value.substringBefore(':').trim()
+                                if (headerName.isNotEmpty()) {
+                                    headerParams.add(headerName)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Scan parameter annotations for @Query, @Path, @Header, @Body, @Field
             for (param in method.parameters) {
                 for (annotation in param.annotations) {
                     val kind = retrofitParamAnnotations[annotation.type] ?: continue
@@ -185,12 +253,17 @@ class UrlExtractor(
 
     /**
      * Strategy 2: Detect OkHttp Request.Builder.url() and HttpUrl.parse() calls.
+     * Also detects Request.Builder.addHeader() calls in the same method.
      */
     private fun processOkHttpCalls(
         instructions: List<Instruction>,
         stringRegs: Array<Map<Int, String>?>,
         className: String
     ) {
+        // First pass: collect all URLs and headers from this method
+        val urls = mutableListOf<String>()
+        val headers = mutableListOf<String>()
+
         for ((i, instr) in instructions.withIndex()) {
             if (instr !is ReferenceInstruction) continue
             val ref = instr.reference as? MethodReference ?: continue
@@ -220,18 +293,38 @@ class UrlExtractor(
             }
 
             if (url != null && isValidUrl(url)) {
-                val parsed = parseUrl(url)
-                addEndpoint(
-                    ApiEndpoint(
-                        fullUrl = url,
-                        baseUrl = parsed.first,
-                        path = parsed.second,
-                        httpMethod = null,
-                        sourceClass = className,
-                        sourceType = "okhttp"
-                    )
-                )
+                urls.add(url)
             }
+
+            // Detect Request.Builder.addHeader(name, value) and header(name, value)
+            if (ref.definingClass == "Lokhttp3/Request\$Builder;" &&
+                (ref.name == "addHeader" || ref.name == "header") &&
+                ref.parameterTypes.size == 2
+            ) {
+                val nameReg = getFirstArgReg(instr)
+                if (nameReg != null) {
+                    val headerName = stringRegs[i]?.get(nameReg)
+                    if (headerName != null && headerName.isNotEmpty()) {
+                        headers.add(headerName)
+                    }
+                }
+            }
+        }
+
+        // Create endpoints: associate all headers found in this method with all URLs
+        for (url in urls) {
+            val parsed = parseUrl(url)
+            addEndpoint(
+                ApiEndpoint(
+                    fullUrl = url,
+                    baseUrl = parsed.first,
+                    path = parsed.second,
+                    httpMethod = null,
+                    sourceClass = className,
+                    sourceType = "okhttp",
+                    headerParams = headers
+                )
+            )
         }
     }
 
@@ -423,14 +516,15 @@ class UrlExtractor(
     }
 
     private fun findRetrofitBaseUrl(interfaceClass: String): String? {
+        // Check interface → baseUrl mapping from create() call analysis
+        retrofitInterfaceBaseUrls[interfaceClass]?.let { return it }
+
         // Check if the class itself has a base URL (unlikely for interfaces but possible)
         retrofitBaseUrls[interfaceClass]?.let { return it }
 
         // If there's exactly one global base URL, use it
         if (retrofitBaseUrls.size == 1) return retrofitBaseUrls.values.first()
 
-        // Could try to trace which Retrofit instance uses this interface,
-        // but that's complex. Return null to just use path.
         return null
     }
 

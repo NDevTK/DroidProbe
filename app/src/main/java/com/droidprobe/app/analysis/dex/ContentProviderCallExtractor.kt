@@ -72,6 +72,7 @@ class ContentProviderCallExtractor {
         // Both overloads: this(C), uri/authority(D), method(E), arg(F), extras(G)
         val authorityOrUri = regStrings[instr.registerD]
         val methodName = regStrings[instr.registerE] ?: return
+        val arg = regStrings[instr.registerF]
 
         // Determine authority based on the first parameter type
         val paramTypes = ref.parameterTypes.toList()
@@ -91,6 +92,7 @@ class ContentProviderCallExtractor {
             ContentProviderCallInfo(
                 authority = authority,
                 methodName = methodName,
+                arg = arg,
                 sourceClass = classDef.type,
                 sourceMethod = method.name
             )

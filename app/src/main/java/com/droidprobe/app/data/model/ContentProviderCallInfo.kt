@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 data class ContentProviderCallInfo(
     val authority: String?,
     val methodName: String,
+    val arg: String? = null,
     val sourceClass: String,
     val sourceMethod: String?
 )

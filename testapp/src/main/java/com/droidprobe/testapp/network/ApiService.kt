@@ -39,4 +39,17 @@ interface ApiService {
         @Path("id") id: String,
         @Body settings: Any
     ): Any
+
+    @Headers("Accept: application/json", "X-Version: 2")
+    @GET("users/{id}/profile")
+    suspend fun getUserProfile(
+        @Path("id") id: String
+    ): Any
+
+    @FormUrlEncoded
+    @POST("auth/login")
+    suspend fun login(
+        @Field("username") user: String,
+        @Field("password") pass: String
+    ): Any
 }

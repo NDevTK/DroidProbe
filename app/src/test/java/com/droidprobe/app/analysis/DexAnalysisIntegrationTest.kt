@@ -91,8 +91,36 @@ class DexAnalysisIntegrationTest {
                         )
                     ))
                 ),
-                services = emptyList(),
-                receivers = emptyList(),
+                services = listOf(
+                    ExportedComponent(
+                        name = "$PKG.services.SyncService",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.SYNC"),
+                            categories = emptyList(),
+                            dataSchemes = emptyList(),
+                            dataAuthorities = emptyList(),
+                            dataPaths = emptyList(),
+                            mimeTypes = emptyList()
+                        ))
+                    )
+                ),
+                receivers = listOf(
+                    ExportedComponent(
+                        name = "$PKG.receivers.DataReceiver",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.DATA"),
+                            categories = emptyList(),
+                            dataSchemes = emptyList(),
+                            dataAuthorities = emptyList(),
+                            dataPaths = emptyList(),
+                            mimeTypes = emptyList()
+                        ))
+                    )
+                ),
                 providers = listOf(
                     provider("BasicProvider", "$PKG.basic", true),
                     provider("DispatchProvider", "$PKG.dispatch", true),
@@ -113,11 +141,15 @@ class DexAnalysisIntegrationTest {
             )
         }
 
-        // Helper: get extras for a specific component
+        // Helper: get extras for a specific activity component
         private fun extrasFor(component: String): List<IntentInfo> =
             analysis.intentExtras.filter {
                 it.associatedComponent == "$PKG.activities.$component"
             }
+
+        // Helper: get extras by full component name (for receivers/services)
+        private fun extrasForComponent(fullName: String): List<IntentInfo> =
+            analysis.intentExtras.filter { it.associatedComponent == fullName }
 
         // Helper: get URI results for a specific authority
         private fun urisForAuthority(authority: String): List<ContentProviderInfo> =
@@ -126,6 +158,10 @@ class DexAnalysisIntegrationTest {
         // Helper: get all query params across all URIs for an authority
         private fun queryParamsForAuthority(authority: String): Set<String> =
             urisForAuthority(authority).flatMap { it.queryParameters }.toSet()
+
+        // Helper: get endpoints by source type
+        private fun endpointsByType(type: String): List<ApiEndpoint> =
+            analysis.apiEndpoints.filter { it.sourceType == type }
     }
 
     // ==================== UriPatternExtractor — POSITIVE ====================
@@ -499,5 +535,641 @@ class DexAnalysisIntegrationTest {
     fun `FileProvider authority NOT in content provider URI results`() {
         val uriAuthorities = analysis.contentProviderUris.mapNotNull { it.authority }.toSet()
         assertThat(uriAuthorities).doesNotContain("$PKG.fileprovider")
+    }
+
+    // ==================== Bug fix verifications ====================
+
+    @Test
+    fun `PutExtra type and values correctly resolved`() {
+        val extras = extrasFor("PutExtraActivity")
+        val actionType = extras.find { it.extraKey == "action_type" }
+        assertThat(actionType).isNotNull()
+        assertThat(actionType!!.extraType).isEqualTo("String")
+        assertThat(actionType.possibleValues).contains("navigate")
+
+        val count = extras.find { it.extraKey == "count" }
+        assertThat(count).isNotNull()
+        assertThat(count!!.extraType).isEqualTo("Int")
+        assertThat(count.possibleValues).contains("42")
+
+        val enabled = extras.find { it.extraKey == "enabled" }
+        assertThat(enabled).isNotNull()
+        assertThat(enabled!!.extraType).isEqualTo("Boolean")
+        assertThat(enabled.possibleValues).contains("true")
+    }
+
+    @Test
+    fun `ContentResolver call arg extracted`() {
+        val clearCache = analysis.contentProviderCalls.find { it.methodName == "clear_cache" }
+        assertThat(clearCache).isNotNull()
+        assertThat(clearCache!!.arg).isEqualTo("all")
+
+        val backup = analysis.contentProviderCalls.find { it.methodName == "backup" }
+        assertThat(backup).isNotNull()
+        assertThat(backup!!.arg).isNull()
+    }
+
+    @Test
+    fun `deep link activity query params detected via orphan propagation`() {
+        val deepLinkUris = analysis.contentProviderUris.filter {
+            it.uriPattern.contains("testapp://open")
+        }
+        assertThat(deepLinkUris).isNotEmpty()
+        val params = deepLinkUris.flatMap { it.queryParameters }.toSet()
+        assertThat(params).containsAtLeast("screen", "id")
+    }
+
+    @Test
+    fun `BasicProvider sort_by has all three values`() {
+        val uris = urisForAuthority("$PKG.basic")
+        val itemsUri = uris.find { it.uriPattern.contains("/items") && !it.uriPattern.contains("#") }
+        assertThat(itemsUri).isNotNull()
+        val sortByValues = itemsUri!!.queryParameterValues["sort_by"] ?: emptyList()
+        assertThat(sortByValues).containsExactly("date", "id", "name")
+    }
+
+    @Test
+    fun `BulkParamReader detects params via getQueryParameterNames and Map get`() {
+        val bulkUris = analysis.contentProviderUris.filter {
+            it.uriPattern.contains("myapp://profile")
+        }
+        assertThat(bulkUris).isNotEmpty()
+        val params = bulkUris.flatMap { it.queryParameters }.toSet()
+        assertThat(params).containsAtLeast("user_id", "action", "referrer")
+    }
+
+    // ==================== Strict value completeness ====================
+
+    @Test
+    fun `BasicProvider filter values exactly match`() {
+        val uris = urisForAuthority("$PKG.basic")
+        val itemsUri = uris.find { it.uriPattern.contains("/items") && !it.uriPattern.contains("#") }
+        assertThat(itemsUri).isNotNull()
+        val filterValues = itemsUri!!.queryParameterValues["filter"] ?: emptyList()
+        assertThat(filterValues).containsExactly("active", "archived")
+    }
+
+    @Test
+    fun `ValueScan mode values exactly match`() {
+        val mode = extrasFor("ValueScanActivity").find { it.extraKey == "mode" }
+        assertThat(mode).isNotNull()
+        assertThat(mode!!.possibleValues).containsExactly("dark", "light", "system")
+    }
+
+    @Test
+    fun `ValueScan level values exactly match`() {
+        val level = extrasFor("ValueScanActivity").find { it.extraKey == "level" }
+        assertThat(level).isNotNull()
+        assertThat(level!!.possibleValues).containsExactly("1", "2", "3", "4")
+    }
+
+    @Test
+    fun `InterProc nav_action values exactly match`() {
+        val navAction = extrasFor("InterProcActivity").find { it.extraKey == "nav_action" }
+        assertThat(navAction).isNotNull()
+        assertThat(navAction!!.possibleValues).containsExactly("home", "profile", "settings")
+    }
+
+    @Test
+    fun `Dispatch messages params exactly match`() {
+        val messageUris = urisForAuthority("$PKG.dispatch")
+            .filter { it.uriPattern.contains("messages") && !it.uriPattern.contains("#") }
+        val params = messageUris.flatMap { it.queryParameters }.toSet()
+        assertThat(params).containsExactly("limit", "sender")
+    }
+
+    @Test
+    fun `Dispatch threads params exactly match`() {
+        val threadUris = urisForAuthority("$PKG.dispatch")
+            .filter { it.uriPattern.contains("threads") }
+        val params = threadUris.flatMap { it.queryParameters }.toSet()
+        assertThat(params).containsExactly("page", "thread_id")
+    }
+
+    // ==================== Retrofit @Headers — POSITIVE ====================
+
+    @Test
+    fun `Retrofit @Headers annotation detects static headers`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val profile = endpoints.find { it.path.contains("profile") }
+        assertThat(profile).isNotNull()
+        assertThat(profile!!.headerParams).containsAtLeast("Accept", "X-Version")
+    }
+
+    // ==================== Retrofit @Headers — NEGATIVE ====================
+
+    @Test
+    fun `@Headers NOT propagated to other Retrofit methods`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val search = endpoints.find { it.path == "search" }
+        assertThat(search).isNotNull()
+        assertThat(search!!.headerParams).containsNoneOf("Accept", "X-Version")
+    }
+
+    @Test
+    fun `@Headers NOT on POST users endpoint`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val post = endpoints.find { it.httpMethod == "POST" && it.path == "users" }
+        assertThat(post).isNotNull()
+        assertThat(post!!.headerParams).isEmpty()
+    }
+
+    // ==================== OkHttp headers — POSITIVE ====================
+
+    @Test
+    fun `OkHttp addHeader detected on export endpoint`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val export = okhttp.find { it.fullUrl.contains("data/export") }
+        assertThat(export).isNotNull()
+        assertThat(export!!.headerParams).containsAtLeast("X-Api-Key", "Accept")
+    }
+
+    @Test
+    fun `OkHttp ApiKeyClient endpoint detected with header`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val geocode = okhttp.find { it.fullUrl.contains("maps.example.com") }
+        assertThat(geocode).isNotNull()
+        assertThat(geocode!!.headerParams).contains("X-Api-Key")
+    }
+
+    // ==================== OkHttp headers — NEGATIVE ====================
+
+    @Test
+    fun `OkHttp headers NOT on image URL endpoint`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val image = okhttp.find { it.fullUrl.contains("cdn.example.com/assets") }
+        assertThat(image).isNotNull()
+        assertThat(image!!.headerParams).isEmpty()
+    }
+
+    // ==================== Multiple Retrofit base URLs — POSITIVE ====================
+
+    @Test
+    fun `CdnService endpoints use cdn base URL`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val cdnEndpoints = endpoints.filter { it.baseUrl.contains("cdn.example.com") }
+        assertThat(cdnEndpoints).isNotEmpty()
+        val paths = cdnEndpoints.map { it.path }
+        assertThat(paths).containsAtLeast("images/{id}", "videos/{id}/stream")
+    }
+
+    @Test
+    fun `CdnService getImage has width and height query params`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val getImage = endpoints.find { it.path == "images/{id}" }
+        assertThat(getImage).isNotNull()
+        assertThat(getImage!!.queryParams).containsAtLeast("width", "height")
+    }
+
+    @Test
+    fun `CdnService streamVideo has Range header`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val stream = endpoints.find { it.path.contains("stream") }
+        assertThat(stream).isNotNull()
+        assertThat(stream!!.headerParams).contains("Range")
+    }
+
+    // ==================== Multiple Retrofit base URLs — NEGATIVE ====================
+
+    @Test
+    fun `ApiService endpoints do NOT use cdn base URL`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val apiEndpoints = endpoints.filter { it.path == "search" || it.path == "users" }
+        for (ep in apiEndpoints) {
+            assertThat(ep.baseUrl).doesNotContain("cdn.example.com")
+        }
+    }
+
+    @Test
+    fun `CdnService endpoints do NOT use api base URL`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val cdnEndpoints = endpoints.filter { it.path.contains("images") || it.path.contains("videos") }
+        for (ep in cdnEndpoints) {
+            assertThat(ep.baseUrl).doesNotContain("api.example.com")
+        }
+    }
+
+    @Test
+    fun `CdnService query params NOT on ApiService endpoints`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val search = endpoints.find { it.path == "search" }
+        assertThat(search).isNotNull()
+        assertThat(search!!.queryParams).containsNoneOf("width", "height")
+    }
+
+    // ==================== API key association — NEGATIVE ====================
+
+    @Test
+    fun `Google API Key NOT associated with endpoints in different classes`() {
+        val googleKey = analysis.sensitiveStrings.find { it.category == "Google API Key" }
+        assertThat(googleKey).isNotNull()
+        // The key is defined in FakeSecrets, not in OkHttpCaller or RetrofitClient
+        // It should NOT be associated with api.example.com endpoints
+        val urls = googleKey!!.associatedUrls
+        assertThat(urls.none { it.contains("api.example.com/v1/") }).isTrue()
+    }
+
+    @Test
+    fun `AWS Key NOT associated with non-FakeSecrets endpoints`() {
+        val awsKey = analysis.sensitiveStrings.find { it.category == "AWS Key" }
+        assertThat(awsKey).isNotNull()
+        // FakeSecrets also contains the Firebase URL literal, so that gets associated
+        // But it should NOT be associated with api.example.com endpoints (different class)
+        val urls = awsKey!!.associatedUrls
+        assertThat(urls.none { it.contains("api.example.com") }).isTrue()
+        assertThat(urls.none { it.contains("maps.example.com") }).isTrue()
+    }
+
+    // ==================== Deep link / BulkParam cross-extractor isolation ====================
+
+    @Test
+    fun `deep link params NOT in content provider params`() {
+        val providerParams = analysis.contentProviderUris
+            .filter { it.uriPattern.startsWith("content://") }
+            .flatMap { it.queryParameters }.toSet()
+        assertThat(providerParams).containsNoneOf("screen", "id")
+    }
+
+    @Test
+    fun `BulkParamReader params NOT on DispatchProvider URIs`() {
+        val dispatchParams = urisForAuthority("$PKG.dispatch")
+            .flatMap { it.queryParameters }.toSet()
+        assertThat(dispatchParams).containsNoneOf("user_id", "action", "referrer")
+    }
+
+    @Test
+    fun `content provider params NOT appearing as deep link params`() {
+        val deepLinkParams = analysis.contentProviderUris
+            .filter { !it.uriPattern.startsWith("content://") }
+            .flatMap { it.queryParameters }.toSet()
+        assertThat(deepLinkParams).containsNoneOf("filter", "sort_by", "sender", "limit")
+    }
+
+    // ==================== PUT endpoint (Retrofit) ====================
+
+    @Test
+    fun `Retrofit PUT endpoint detected with path and body`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val put = endpoints.find { it.httpMethod == "PUT" }
+        assertThat(put).isNotNull()
+        assertThat(put!!.pathParams).contains("id")
+        assertThat(put.hasBody).isTrue()
+    }
+
+    @Test
+    fun `Retrofit PATCH endpoint detected`() {
+        val endpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val patch = endpoints.find { it.httpMethod == "PATCH" }
+        assertThat(patch).isNotNull()
+        assertThat(patch!!.path).contains("settings")
+    }
+
+    // ==================== Group A: associatedAction ====================
+
+    @Test
+    fun `PutExtra extras have associatedAction from manifest`() {
+        val extras = extrasFor("PutExtraActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.PUT") }
+    }
+
+    @Test
+    fun `DirectExtra extras have associatedAction`() {
+        val extras = extrasFor("DirectExtraActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.DIRECT") }
+    }
+
+    @Test
+    fun `ValueScan extras have associatedAction`() {
+        val extras = extrasFor("ValueScanActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.VALUES") }
+    }
+
+    @Test
+    fun `InterProc extras have associatedAction`() {
+        val extras = extrasFor("InterProcActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.INTERPROC") }
+    }
+
+    @Test
+    fun `BundleExtra extras have associatedAction`() {
+        val extras = extrasFor("BundleExtraActivity")
+        assertThat(extras).isNotEmpty()
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.BUNDLE") }
+    }
+
+    // ==================== Group B: BroadcastReceiver / Service extras ====================
+
+    @Test
+    fun `DataReceiver extras detected with correct types`() {
+        val extras = extrasForComponent("$PKG.receivers.DataReceiver")
+        val keys = extras.map { it.extraKey }.toSet()
+        assertThat(keys).containsAtLeast("source", "priority")
+        assertThat(extras.find { it.extraKey == "source" }!!.extraType).isEqualTo("String")
+        assertThat(extras.find { it.extraKey == "priority" }!!.extraType).isEqualTo("Int")
+    }
+
+    @Test
+    fun `DataReceiver extras have correct associatedComponent`() {
+        val extras = extrasForComponent("$PKG.receivers.DataReceiver")
+        extras.forEach {
+            assertThat(it.associatedComponent).isEqualTo("$PKG.receivers.DataReceiver")
+        }
+    }
+
+    @Test
+    fun `DataReceiver extras have associatedAction`() {
+        val extras = extrasForComponent("$PKG.receivers.DataReceiver")
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.DATA") }
+    }
+
+    @Test
+    fun `SyncService extras detected with correct types`() {
+        val extras = extrasForComponent("$PKG.services.SyncService")
+        val keys = extras.map { it.extraKey }.toSet()
+        assertThat(keys).containsAtLeast("sync_type", "force")
+        assertThat(extras.find { it.extraKey == "sync_type" }!!.extraType).isEqualTo("String")
+        assertThat(extras.find { it.extraKey == "force" }!!.extraType).isEqualTo("Boolean")
+    }
+
+    @Test
+    fun `SyncService extras have correct associatedComponent`() {
+        val extras = extrasForComponent("$PKG.services.SyncService")
+        extras.forEach {
+            assertThat(it.associatedComponent).isEqualTo("$PKG.services.SyncService")
+        }
+    }
+
+    @Test
+    fun `SyncService extras have associatedAction`() {
+        val extras = extrasForComponent("$PKG.services.SyncService")
+        extras.forEach { assertThat(it.associatedAction).isEqualTo("$PKG.action.SYNC") }
+    }
+
+    @Test
+    fun `DataReceiver extras NOT on SyncService`() {
+        val syncExtras = extrasForComponent("$PKG.services.SyncService")
+            .map { it.extraKey }.toSet()
+        assertThat(syncExtras).containsNoneOf("source", "priority")
+    }
+
+    @Test
+    fun `SyncService extras NOT on DataReceiver`() {
+        val receiverExtras = extrasForComponent("$PKG.receivers.DataReceiver")
+            .map { it.extraKey }.toSet()
+        assertThat(receiverExtras).containsNoneOf("sync_type", "force")
+    }
+
+    // ==================== Group C: DeepLinkHandler ref param ====================
+
+    @Test
+    fun `DeepLinkHandler ref param linked to deeplink URI`() {
+        val deepLinkUris = analysis.contentProviderUris.filter {
+            it.uriPattern == "myapp://deeplink/home"
+        }
+        assertThat(deepLinkUris).isNotEmpty()
+        assertThat(deepLinkUris.first().queryParameters).contains("ref")
+    }
+
+    @Test
+    fun `ref param NOT on testapp open URI`() {
+        val openUris = analysis.contentProviderUris.filter {
+            it.uriPattern == "testapp://open"
+        }
+        assertThat(openUris).isNotEmpty()
+        val openParams = openUris.flatMap { it.queryParameters }.toSet()
+        assertThat(openParams).doesNotContain("ref")
+    }
+
+    @Test
+    fun `customscheme action open in deepLinkUriStrings`() {
+        assertThat(analysis.deepLinkUriStrings).contains("customscheme://action/open")
+    }
+
+    // ==================== Group D: Activity-alias ====================
+
+    @Test
+    fun `customscheme action open detected as content provider URI`() {
+        val uris = analysis.contentProviderUris.filter {
+            it.uriPattern == "customscheme://action/open"
+        }
+        assertThat(uris).isNotEmpty()
+        assertThat(uris.first().sourceClass).contains("DeepLinkHandler")
+    }
+
+    @Test
+    fun `myapp deeplink home detected as content provider URI`() {
+        val uris = analysis.contentProviderUris.filter {
+            it.uriPattern == "myapp://deeplink/home"
+        }
+        assertThat(uris).isNotEmpty()
+        assertThat(uris.first().sourceClass).contains("DeepLinkHandler")
+    }
+
+    @Test
+    fun `deep link URIs correctly paired by gated CFG`() {
+        // myapp://deeplink/home should exist but myapp://deeplink/open should NOT
+        val patterns = analysis.contentProviderUris.map { it.uriPattern }.toSet()
+        assertThat(patterns).contains("myapp://deeplink/home")
+        assertThat(patterns).contains("customscheme://action/open")
+        assertThat(patterns).doesNotContain("myapp://deeplink/open")
+        assertThat(patterns).doesNotContain("myapp://action/open")
+        assertThat(patterns).doesNotContain("customscheme://deeplink/home")
+    }
+
+    // ==================== Group E: ContentUris.withAppendedId ====================
+
+    @Test
+    fun `withAppendedId URI detected for basic items`() {
+        val basicUris = urisForAuthority("$PKG.basic")
+        val patterns = basicUris.map { it.uriPattern }
+        // AppendIdCaller creates content://...basic/items via ContentUris.withAppendedId
+        // The items URI should exist (either from UriMatcher or from AppendIdCaller)
+        assertThat(patterns.any { it.contains("items") }).isTrue()
+    }
+
+    @Test
+    fun `withAppendedId base URI in raw content URIs`() {
+        assertThat(analysis.rawContentUriStrings).contains("content://$PKG.basic/items")
+    }
+
+    // ==================== Group F: getBooleanQueryParameter defaults ====================
+
+    @Test
+    fun `ParamProvider verbose default is false`() {
+        val paramUris = urisForAuthority("$PKG.params")
+        val defaults = paramUris.flatMap { it.queryParameterDefaults.entries }
+            .associate { it.key to it.value }
+        assertThat(defaults["verbose"]).isEqualTo("false")
+    }
+
+    @Test
+    fun `ParamProvider include_deleted default is true`() {
+        val paramUris = urisForAuthority("$PKG.params")
+        val defaults = paramUris.flatMap { it.queryParameterDefaults.entries }
+            .associate { it.key to it.value }
+        assertThat(defaults["include_deleted"]).isEqualTo("true")
+    }
+
+    @Test
+    fun `BasicProvider has no query parameter defaults`() {
+        val basicUris = urisForAuthority("$PKG.basic")
+        val allDefaults = basicUris.flatMap { it.queryParameterDefaults.entries }
+        assertThat(allDefaults).isEmpty()
+    }
+
+    // ==================== Group G: Positive API key association ====================
+
+    @Test
+    fun `FakeSecrets sensitive strings have Firebase URL in associatedUrls`() {
+        val secrets = analysis.sensitiveStrings.filter {
+            it.sourceClass.contains("FakeSecrets") && it.category != "Firebase URL"
+        }
+        assertThat(secrets).isNotEmpty()
+        secrets.forEach { secret ->
+            assertThat(secret.associatedUrls).contains("https://my-test-project.firebaseio.com")
+        }
+    }
+
+    @Test
+    fun `FakeSecrets sensitive strings NOT associated with api example com`() {
+        val secrets = analysis.sensitiveStrings.filter {
+            it.sourceClass.contains("FakeSecrets")
+        }
+        secrets.forEach { secret ->
+            secret.associatedUrls.forEach { url ->
+                assertThat(url).doesNotContain("api.example.com")
+            }
+        }
+    }
+
+    // ==================== Group H: Endpoint dedup ====================
+
+    @Test
+    fun `same URL from Retrofit and literal dedups to Retrofit`() {
+        // "https://api.example.com/v1/users" exists as both Retrofit POST and literal
+        val usersEndpoints = analysis.apiEndpoints.filter {
+            it.fullUrl == "https://api.example.com/v1/users"
+        }
+        assertThat(usersEndpoints.any { it.sourceType == "retrofit" }).isTrue()
+    }
+
+    @Test
+    fun `deduped Retrofit users endpoint retains httpMethod POST`() {
+        val postUsers = analysis.apiEndpoints.find {
+            it.fullUrl == "https://api.example.com/v1/users" && it.sourceType == "retrofit"
+        }
+        assertThat(postUsers).isNotNull()
+        assertThat(postUsers!!.httpMethod).isEqualTo("POST")
+    }
+
+    @Test
+    fun `literal-only URLs still appear`() {
+        val hooks = analysis.apiEndpoints.find {
+            it.fullUrl == "https://hooks.example.com/webhook"
+        }
+        assertThat(hooks).isNotNull()
+        assertThat(hooks!!.sourceType).isEqualTo("literal")
+    }
+
+    // ==================== Group I: Retrofit @Field ====================
+
+    @Test
+    fun `Field params detected as query params on login endpoint`() {
+        val login = analysis.apiEndpoints.find {
+            it.path == "auth/login" && it.sourceType == "retrofit"
+        }
+        assertThat(login).isNotNull()
+        assertThat(login!!.queryParams).containsAtLeast("username", "password")
+    }
+
+    @Test
+    fun `login endpoint has POST method and correct base URL`() {
+        val login = analysis.apiEndpoints.find {
+            it.path == "auth/login" && it.sourceType == "retrofit"
+        }
+        assertThat(login).isNotNull()
+        assertThat(login!!.httpMethod).isEqualTo("POST")
+        assertThat(login.baseUrl).isEqualTo("https://api.example.com/v1/")
+    }
+
+    @Test
+    fun `Field params NOT on GET search endpoint`() {
+        val search = analysis.apiEndpoints.find {
+            it.path == "search" && it.sourceType == "retrofit"
+        }
+        assertThat(search).isNotNull()
+        assertThat(search!!.queryParams).containsNoneOf("username", "password")
+    }
+
+    // ==================== Group J: HttpUrl.parse / toHttpUrl ====================
+
+    @Test
+    fun `HttpUrl toHttpUrl URL detected as OkHttp endpoint`() {
+        val configEndpoint = analysis.apiEndpoints.find {
+            it.fullUrl == "https://static.example.com/v2/config.json"
+        }
+        assertThat(configEndpoint).isNotNull()
+        assertThat(configEndpoint!!.sourceType).isEqualTo("okhttp")
+    }
+
+    @Test
+    fun `HttpUrl endpoint not duplicated`() {
+        val configEndpoints = analysis.apiEndpoints.filter {
+            it.fullUrl == "https://static.example.com/v2/config.json"
+        }
+        assertThat(configEndpoints).hasSize(1)
+    }
+
+    // ==================== Group K: File constructor ====================
+
+    @Test
+    fun `File String String constructor resolves child path`() {
+        val paths = analysis.fileProviderPaths.filter { it.pathType == "code-reference" }
+        val fileNames = paths.map { it.filePath }
+        assertThat(fileNames).contains("app.log")
+    }
+
+    @Test
+    fun `File paths from different constructors all detected`() {
+        val codeRefs = analysis.fileProviderPaths.filter { it.pathType == "code-reference" }
+        val fileNames = codeRefs.map { it.filePath }
+        assertThat(fileNames).containsAtLeast("report.pdf", "data.csv", "app.log")
+    }
+
+    // ==================== Group L: Cross-extractor isolation ====================
+
+    @Test
+    fun `receiver extras NOT on any activity component`() {
+        val activityExtras = analysis.intentExtras.filter {
+            it.associatedComponent?.contains(".activities.") == true
+        }.map { it.extraKey }.toSet()
+        assertThat(activityExtras).doesNotContain("source")
+    }
+
+    @Test
+    fun `service extras NOT on any activity component`() {
+        val activityExtras = analysis.intentExtras.filter {
+            it.associatedComponent?.contains(".activities.") == true
+        }.map { it.extraKey }.toSet()
+        assertThat(activityExtras).doesNotContain("sync_type")
+    }
+
+    @Test
+    fun `activity extras NOT on receiver or service components`() {
+        val nonActivityExtras = analysis.intentExtras.filter {
+            it.associatedComponent?.contains(".receivers.") == true ||
+                it.associatedComponent?.contains(".services.") == true
+        }.map { it.extraKey }.toSet()
+        assertThat(nonActivityExtras).containsNoneOf("user_name", "mode", "theme", "nav_action")
+    }
+
+    @Test
+    fun `deep link ref param NOT in API endpoint query params`() {
+        val apiParams = analysis.apiEndpoints.flatMap { it.queryParams }.toSet()
+        assertThat(apiParams).doesNotContain("ref")
     }
 }

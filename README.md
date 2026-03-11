@@ -7,10 +7,6 @@ Unlike tools like Drozer that require typing raw URIs and intent parameters, Dro
 ## Install & Testing group
 The test release of DroidProbe is published after joining <https://groups.google.com/g/droidprobe> it can be installed at <https://play.google.com/store/apps/details?id=com.droidprobe.app> please provide feedback :)
 
-## Download
-
-[**Download debug APK**](app/build/outputs/apk/debug/app-debug.apk) — sideload directly to any Android 8.0+ device.
-
 ## Features
 
 - **App Scanner** — Lists all installed apps (including system apps) with search filtering

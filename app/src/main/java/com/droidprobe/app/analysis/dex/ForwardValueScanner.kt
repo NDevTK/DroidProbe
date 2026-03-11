@@ -16,7 +16,12 @@ import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 
 /**
- * Shared forward-scanning utility for detecting possible values after API calls.
+ * CFG-aware forward-scanning utility for detecting possible values after API calls.
+ *
+ * Uses [MethodCFG] successor edges to walk all reachable instructions from a
+ * starting point, following actual control flow rather than a fixed instruction
+ * window. This eliminates arbitrary window limits and correctly handles branches,
+ * loops, and non-linear control flow.
  *
  * Used by both [UriPatternExtractor] (getQueryParameter, Map.get results)
  * and [IntentExtraExtractor] (getXxxExtra results).
@@ -33,66 +38,88 @@ object ForwardValueScanner {
     )
 
     /**
-     * Scan forward from [startIndex] tracking [resultReg] to detect:
-     * - String comparisons: equals / equalsIgnoreCase / TextUtils.equals / Objects.equals
+     * BFS state: instruction index + which register currently holds the tracked value.
+     * Different CFG paths may rename the register (move-object, move-result-object),
+     * so each path carries its own tracked register.
+     */
+    private data class RegState(val index: Int, val reg: Int)
+
+    /**
+     * Scan forward from [startIndex] using CFG [successors] edges, tracking [resultReg]
+     * through all reachable paths to detect:
+     * - String comparisons: equals / equalsIgnoreCase / TextUtils.equals / Objects.equals / Intrinsics.areEqual
      * - String prefix checks: startsWith
      * - Type conversions: Integer.parseInt → type="int", Boolean.parseBoolean → type="boolean"
      * - URI component checks: Uri.getHost/getScheme/getPath → equals (qualified as full URLs)
      *
      * Tracks the register through move-object, check-cast, and method call results.
-     * Stops at RETURN/THROW opcodes or when the tracked register is overwritten.
+     * Each CFG path stops when the tracked register is overwritten; terminal
+     * instructions (RETURN/THROW) have no successors and stop naturally.
      */
     fun scanStringValues(
         instructions: List<Instruction>,
         startIndex: Int,
         resultReg: Int,
         cfgStrings: Array<Map<Int, String>?>,
-        window: Int = 30
+        successors: Array<IntArray>
     ): ValueScanResult {
         val values = mutableSetOf<String>()
         var detectedType: String? = null
         var convertedResultReg: Int? = null
         var convertedResultIndex: Int? = null
         var storedToField: String? = null
-        var trackedReg = resultReg
-        var skipNextMoveResult = false
 
-        val limit = minOf(instructions.size, startIndex + window)
-        for (i in startIndex until limit) {
+        val queue = ArrayDeque<RegState>()
+        val visited = mutableSetOf<RegState>()
+
+        if (startIndex in instructions.indices) {
+            val initial = RegState(startIndex, resultReg)
+            queue.add(initial)
+            visited.add(initial)
+        }
+
+        while (queue.isNotEmpty()) {
+            val (i, trackedReg) = queue.removeFirst()
             val instr = instructions[i]
-
-            // Stop at control flow exits
-            if (instr.opcode in CONTROL_FLOW_STOPS) break
+            var nextReg = trackedReg
+            var enqueue = true
 
             // Track move-object: follow the value to its new register
             if (instr.opcode == Opcode.MOVE_OBJECT || instr.opcode == Opcode.MOVE_OBJECT_FROM16 ||
                 instr.opcode == Opcode.MOVE_OBJECT_16
             ) {
                 if (instr is TwoRegisterInstruction && instr.registerB == trackedReg) {
-                    trackedReg = instr.registerA
+                    nextReg = instr.registerA
                 }
+                enqueueRegSuccessors(queue, visited, successors, i, nextReg)
                 continue
             }
 
             // check-cast: value stays in same register
-            if (instr.opcode == Opcode.CHECK_CAST) continue
+            if (instr.opcode == Opcode.CHECK_CAST) {
+                enqueueRegSuccessors(queue, visited, successors, i, trackedReg)
+                continue
+            }
 
             // Track through move-result-object after method calls on the tracked register.
-            // Follows value through transformations: Optional.ofNullable, Optional.get,
-            // String.trim, etc. — including to different result registers.
-            // Skipped after Uri component extraction (getHost etc.) to keep tracking the URI.
-            if (instr.opcode == Opcode.MOVE_RESULT_OBJECT && instr is OneRegisterInstruction &&
-                i > startIndex
-            ) {
-                if (skipNextMoveResult) {
-                    skipNextMoveResult = false
-                    continue
-                }
+            // Skip update if the previous instruction was a Uri component call or hashCode
+            // (we want to keep tracking the original Uri/String register).
+            if (instr.opcode == Opcode.MOVE_RESULT_OBJECT && instr is OneRegisterInstruction && i > 0) {
                 val prev = instructions[i - 1]
-                if (prev is Instruction35c && prev.registerC == trackedReg) {
-                    trackedReg = instr.registerA
-                    continue
+                val skipUpdate = prev is ReferenceInstruction && run {
+                    val ref = prev.reference
+                    ref is MethodReference && (
+                        (ref.definingClass == "Landroid/net/Uri;" &&
+                            ref.name in URI_COMPONENT_METHODS && ref.parameterTypes.isEmpty()) ||
+                        (ref.definingClass == "Ljava/lang/String;" &&
+                            ref.name == "hashCode" && ref.parameterTypes.isEmpty())
+                    )
                 }
+                if (!skipUpdate && prev is Instruction35c && prev.registerC == trackedReg) {
+                    nextReg = instr.registerA
+                }
+                enqueueRegSuccessors(queue, visited, successors, i, nextReg)
+                continue
             }
 
             // Record field stores of tracked value (for caller field-tracking pass)
@@ -104,95 +131,109 @@ object ForwardValueScanner {
                 if (ref is FieldReference && storedToField == null) {
                     storedToField = "${ref.definingClass}->${ref.name}:${ref.type}"
                 }
+                enqueueRegSuccessors(queue, visited, successors, i, trackedReg)
                 continue
             }
 
-            // Stop if tracked register is overwritten
+            // Stop THIS PATH if tracked register is overwritten
             if (instr.opcode.setsRegister() && instr is OneRegisterInstruction &&
                 instr.registerA == trackedReg
-            ) break
-
-            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
-            val ref = instr.reference
-            if (ref !is MethodReference) continue
-
-            val regStrings = cfgStrings[i] ?: continue
-
-            // Integer.parseInt(String) or Integer.valueOf(String)
-            if (ref.definingClass == "Ljava/lang/Integer;" &&
-                (ref.name == "parseInt" || ref.name == "valueOf") &&
-                ref.parameterTypes.size == 1 && instr.registerC == trackedReg
             ) {
-                detectedType = "int"
-                val intReg = getMoveResultRegister(instructions, i)
-                if (intReg != null) {
-                    convertedResultReg = intReg
-                    convertedResultIndex = i + 2
-                    trackedReg = intReg
+                // Don't enqueue successors — register is dead on this path
+                continue
+            }
+
+            // Process method calls for value detection
+            if (instr is ReferenceInstruction && instr is Instruction35c) {
+                val ref = instr.reference
+                if (ref is MethodReference) {
+                    val regStrings = cfgStrings[i]
+                    if (regStrings != null) {
+                        // Integer.parseInt(String) or Integer.valueOf(String)
+                        if (ref.definingClass == "Ljava/lang/Integer;" &&
+                            (ref.name == "parseInt" || ref.name == "valueOf") &&
+                            ref.parameterTypes.size == 1 && instr.registerC == trackedReg
+                        ) {
+                            detectedType = "int"
+                            val intReg = getMoveResultRegister(instructions, i)
+                            if (intReg != null) {
+                                convertedResultReg = intReg
+                                convertedResultIndex = i + 2
+                                nextReg = intReg
+                            }
+                        }
+
+                        // Boolean.parseBoolean(String)
+                        if (ref.definingClass == "Ljava/lang/Boolean;" &&
+                            ref.name == "parseBoolean" && ref.parameterTypes.size == 1 &&
+                            instr.registerC == trackedReg
+                        ) {
+                            detectedType = "boolean"
+                            values.addAll(listOf("true", "false"))
+                        }
+
+                        // Uri.getHost / getScheme / getPath on a parsed Uri register
+                        if (ref.definingClass == "Landroid/net/Uri;" &&
+                            ref.name in URI_COMPONENT_METHODS &&
+                            ref.parameterTypes.isEmpty() && instr.registerC == trackedReg
+                        ) {
+                            val componentReg = getMoveResultRegister(instructions, i)
+                            if (componentReg != null) {
+                                collectUriComponentValues(
+                                    values, instructions, i + 2, componentReg, cfgStrings, ref.name, successors
+                                )
+                            }
+                            // Keep tracking the Uri register (nextReg unchanged)
+                        }
+
+                        // String.hashCode() — compiled string switch: hashCode → switch → equals branches
+                        if (ref.definingClass == "Ljava/lang/String;" && ref.name == "hashCode" &&
+                            ref.parameterTypes.isEmpty() && instr.registerC == trackedReg
+                        ) {
+                            values.addAll(scanStringSwitchValues(instructions, i + 1, trackedReg, cfgStrings))
+                            // Switch values collected exhaustively from entire method — stop this path
+                            enqueue = false
+                        }
+
+                        // String.equals / equalsIgnoreCase
+                        if (ref.definingClass == "Ljava/lang/String;" &&
+                            (ref.name == "equals" || ref.name == "equalsIgnoreCase")
+                        ) {
+                            extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
+                        }
+
+                        // TextUtils.equals
+                        if (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") {
+                            extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
+                        }
+
+                        // Objects.equals (desugared j$.util.Objects or java.util.Objects) — 2-param static
+                        if (ref.name == "equals" && ref.parameterTypes.size == 2 &&
+                            ref.definingClass.endsWith("/Objects;")
+                        ) {
+                            extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
+                        }
+
+                        // Kotlin == compiles to Intrinsics.areEqual(Object, Object) — 2-param static
+                        if (ref.name == "areEqual" && ref.parameterTypes.size == 2 &&
+                            ref.definingClass == "Lkotlin/jvm/internal/Intrinsics;"
+                        ) {
+                            extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
+                        }
+
+                        // String.startsWith
+                        if (ref.definingClass == "Ljava/lang/String;" && ref.name == "startsWith" &&
+                            ref.parameterTypes.size == 1 && instr.registerC == trackedReg
+                        ) {
+                            regStrings[instr.registerD]?.let { values.add(it) }
+                        }
+                    }
                 }
-                continue
             }
 
-            // Boolean.parseBoolean(String)
-            if (ref.definingClass == "Ljava/lang/Boolean;" &&
-                ref.name == "parseBoolean" && ref.parameterTypes.size == 1 &&
-                instr.registerC == trackedReg
-            ) {
-                detectedType = "boolean"
-                values.addAll(listOf("true", "false"))
-                continue
-            }
-
-            // Uri.getHost / getScheme / getPath on a parsed Uri register:
-            // Do a mini-scan for comparisons on the component result, qualify values,
-            // and keep tracking the Uri register for more component calls.
-            if (ref.definingClass == "Landroid/net/Uri;" &&
-                ref.name in URI_COMPONENT_METHODS &&
-                ref.parameterTypes.isEmpty() && instr.registerC == trackedReg
-            ) {
-                val componentReg = getMoveResultRegister(instructions, i)
-                if (componentReg != null) {
-                    collectUriComponentValues(
-                        values, instructions, i + 2, componentReg, cfgStrings, ref.name
-                    )
-                    skipNextMoveResult = true
-                }
-                continue
-            }
-
-            // String.hashCode() — compiled string switch: hashCode → switch → equals branches
-            if (ref.definingClass == "Ljava/lang/String;" && ref.name == "hashCode" &&
-                ref.parameterTypes.isEmpty() && instr.registerC == trackedReg
-            ) {
-                values.addAll(scanStringSwitchValues(instructions, i + 1, trackedReg, cfgStrings))
-                skipNextMoveResult = true
-                break
-            }
-
-            // String.equals / equalsIgnoreCase
-            if (ref.definingClass == "Ljava/lang/String;" &&
-                (ref.name == "equals" || ref.name == "equalsIgnoreCase")
-            ) {
-                extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
-            }
-
-            // TextUtils.equals
-            if (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") {
-                extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
-            }
-
-            // Objects.equals (desugared j$.util.Objects or java.util.Objects) — 2-param static
-            if (ref.name == "equals" && ref.parameterTypes.size == 2 &&
-                ref.definingClass.endsWith("/Objects;")
-            ) {
-                extractComparedValue(instr, trackedReg, regStrings)?.let { values.add(it) }
-            }
-
-            // String.startsWith
-            if (ref.definingClass == "Ljava/lang/String;" && ref.name == "startsWith" &&
-                ref.parameterTypes.size == 1 && instr.registerC == trackedReg
-            ) {
-                regStrings[instr.registerD]?.let { values.add(it) }
+            // Enqueue successors with current tracked register
+            if (enqueue) {
+                enqueueRegSuccessors(queue, visited, successors, i, nextReg)
             }
         }
 
@@ -200,21 +241,38 @@ object ForwardValueScanner {
     }
 
     /**
-     * Scan forward from [startIndex] for integer value comparisons on [resultReg]:
+     * Scan forward from [startIndex] using CFG [successors] for integer value
+     * comparisons on [resultReg]:
      * - packed-switch / sparse-switch → extract all case keys
      * - if-eq / if-ne vs int constant → extract compared value
+     *
+     * Stops each path when the result register is overwritten.
      */
     fun scanIntValues(
         instructions: List<Instruction>,
         startIndex: Int,
         resultReg: Int,
-        window: Int = 20
+        successors: Array<IntArray>
     ): List<String> {
         val values = mutableSetOf<String>()
-        val limit = minOf(instructions.size, startIndex + window)
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
 
-        for (i in startIndex until limit) {
+        if (startIndex in instructions.indices) {
+            queue.add(startIndex)
+            visited.add(startIndex)
+        }
+
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
             val instr = instructions[i]
+
+            // Stop this path if result register is overwritten
+            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction &&
+                instr.registerA == resultReg
+            ) {
+                continue
+            }
 
             // packed-switch / sparse-switch on result register
             if (instr.opcode == Opcode.PACKED_SWITCH || instr.opcode == Opcode.SPARSE_SWITCH) {
@@ -222,7 +280,8 @@ object ForwardValueScanner {
                     findSwitchPayload(instructions, i)?.let { keys ->
                         values.addAll(keys.map { it.toString() })
                     }
-                    break
+                    // Found switch — don't continue on this path
+                    continue
                 }
             }
 
@@ -232,10 +291,12 @@ object ForwardValueScanner {
                     val otherReg = when {
                         instr.registerA == resultReg -> instr.registerB
                         instr.registerB == resultReg -> instr.registerA
-                        else -> continue
+                        else -> null
                     }
-                    resolveIntFromRegister(instructions, i, otherReg)?.let {
-                        values.add(it.toString())
+                    if (otherReg != null) {
+                        resolveIntFromRegister(instructions, i, otherReg)?.let {
+                            values.add(it.toString())
+                        }
                     }
                 }
             }
@@ -245,6 +306,11 @@ object ForwardValueScanner {
                 if (instr is OneRegisterInstruction && instr.registerA == resultReg) {
                     values.add("0")
                 }
+            }
+
+            // Enqueue successors
+            for (s in successors[i]) {
+                if (visited.add(s)) queue.add(s)
             }
         }
         return values.toList()
@@ -288,27 +354,51 @@ object ForwardValueScanner {
      * Follow an int register into a called method and scan for int comparisons there.
      * Detects patterns like: invoke-static {intReg}, Lsome/Enum;->fromValue(I)Lsome/Enum;
      * and scans the target method for if-eqz/if-eq/switch patterns on the parameter.
+     *
+     * Uses CFG [successors] to walk reachable instructions from [startIndex] to find
+     * the call site, then builds a CFG for the target method for the inner scan.
      */
     fun resolveEnumValues(
         classIndex: Map<String, DexBackedClassDef>,
         instructions: List<Instruction>,
         startIndex: Int,
         intReg: Int,
-        window: Int = 10
+        successors: Array<IntArray>
     ): List<String> {
-        val limit = minOf(instructions.size, startIndex + window)
-        for (i in startIndex until limit) {
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
+
+        if (startIndex in instructions.indices) {
+            queue.add(startIndex)
+            visited.add(startIndex)
+        }
+
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
             val instr = instructions[i]
 
-            // Stop at control flow exits
-            if (instr.opcode in CONTROL_FLOW_STOPS) break
+            // Stop this path if intReg is overwritten
+            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction &&
+                instr.registerA == intReg
+            ) {
+                continue
+            }
 
-            if (instr !is ReferenceInstruction) continue
+            if (instr !is ReferenceInstruction) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val ref = instr.reference
-            if (ref !is MethodReference) continue
+            if (ref !is MethodReference) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Skip framework classes
-            if (isFrameworkClass(ref.definingClass)) continue
+            if (isFrameworkClass(ref.definingClass)) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Find which argument position intReg occupies
             val argIndex = when (instr) {
@@ -319,38 +409,67 @@ object ForwardValueScanner {
                         instr.registerCount >= 3 && instr.registerE == intReg -> 2
                         instr.registerCount >= 4 && instr.registerF == intReg -> 3
                         instr.registerCount >= 5 && instr.registerG == intReg -> 4
-                        else -> continue
+                        else -> {
+                            for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                            continue
+                        }
                     }
                 }
                 is Instruction3rc -> {
                     val offset = intReg - instr.startRegister
-                    if (offset in 0 until instr.registerCount) offset else continue
+                    if (offset in 0 until instr.registerCount) offset else {
+                        for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                        continue
+                    }
                 }
-                else -> continue
+                else -> {
+                    for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                    continue
+                }
             }
 
             // For virtual/interface calls, arg 0 is 'this' — the actual params start at index 1
             val isStatic = instr.opcode == Opcode.INVOKE_STATIC ||
                     instr.opcode == Opcode.INVOKE_STATIC_RANGE
             val paramIndex = if (isStatic) argIndex else argIndex - 1
-            if (paramIndex < 0) continue // intReg is 'this', not a parameter
+            if (paramIndex < 0) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Verify the parameter at paramIndex is an int type
-            if (paramIndex >= ref.parameterTypes.size) continue
+            if (paramIndex >= ref.parameterTypes.size) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val paramType = ref.parameterTypes[paramIndex].toString()
-            if (paramType != "I" && paramType != "S" && paramType != "B") continue
+            if (paramType != "I" && paramType != "S" && paramType != "B") {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Resolve the target method
-            val targetClass = classIndex[ref.definingClass] ?: continue
+            val targetClass = classIndex[ref.definingClass]
+            if (targetClass == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val targetMethod = targetClass.methods.find { m ->
                 m.name == ref.name &&
                         m.parameterTypes.size == ref.parameterTypes.size &&
                         m.parameterTypes.zip(ref.parameterTypes).all { (a, b) -> a.toString() == b.toString() }
-            } ?: continue
-            val impl = targetMethod.implementation ?: continue
+            }
+            if (targetMethod == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
+            val impl = targetMethod.implementation
+            if (impl == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Compute the parameter's register in the target method
-            // Register layout: [locals...] [params...] where params include 'this' for virtual
             val targetIsStatic = targetMethod.accessFlags and 0x0008 != 0 // ACC_STATIC
             val paramSlotOffset = if (targetIsStatic) 0 else 1 // skip 'this' slot
             var regOffset = paramSlotOffset
@@ -361,8 +480,12 @@ object ForwardValueScanner {
             val paramReg = impl.registerCount - computeParamSize(ref, targetIsStatic) + regOffset
 
             val targetInstructions = impl.instructions.toList()
-            val result = scanIntValues(targetInstructions, 0, paramReg, window = 30)
+            val targetCfg = MethodCFG(targetInstructions, impl.tryBlocks)
+            val result = scanIntValues(targetInstructions, 0, paramReg, targetCfg.successors)
             if (result.isNotEmpty()) return result
+
+            // Continue BFS to find other potential call sites
+            for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
         }
         return emptyList()
     }
@@ -371,6 +494,9 @@ object ForwardValueScanner {
      * Follow a string register into a called method and scan for string comparisons there.
      * Mirrors [resolveEnumValues] but for String parameters — detects equals() comparisons
      * and string switch (hashCode + equals) patterns in the target method.
+     *
+     * Uses CFG [successors] to walk reachable instructions from [startIndex] to find
+     * the call site, then builds a CFG for the target method for the inner scan.
      */
     fun resolveStringEnumValues(
         classIndex: Map<String, DexBackedClassDef>,
@@ -378,19 +504,41 @@ object ForwardValueScanner {
         startIndex: Int,
         stringReg: Int,
         cfgStrings: Array<Map<Int, String>?>,
-        window: Int = 10
+        successors: Array<IntArray>
     ): List<String> {
-        val limit = minOf(instructions.size, startIndex + window)
-        for (i in startIndex until limit) {
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
+
+        if (startIndex in instructions.indices) {
+            queue.add(startIndex)
+            visited.add(startIndex)
+        }
+
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
             val instr = instructions[i]
 
-            if (instr.opcode in CONTROL_FLOW_STOPS) break
+            // Stop this path if stringReg is overwritten
+            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction &&
+                instr.registerA == stringReg
+            ) {
+                continue
+            }
 
-            if (instr !is ReferenceInstruction) continue
+            if (instr !is ReferenceInstruction) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val ref = instr.reference
-            if (ref !is MethodReference) continue
+            if (ref !is MethodReference) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
-            if (isFrameworkClass(ref.definingClass)) continue
+            if (isFrameworkClass(ref.definingClass)) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             // Find which argument position stringReg occupies
             val argIndex = when (instr) {
@@ -401,32 +549,62 @@ object ForwardValueScanner {
                         instr.registerCount >= 3 && instr.registerE == stringReg -> 2
                         instr.registerCount >= 4 && instr.registerF == stringReg -> 3
                         instr.registerCount >= 5 && instr.registerG == stringReg -> 4
-                        else -> continue
+                        else -> {
+                            for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                            continue
+                        }
                     }
                 }
                 is Instruction3rc -> {
                     val offset = stringReg - instr.startRegister
-                    if (offset in 0 until instr.registerCount) offset else continue
+                    if (offset in 0 until instr.registerCount) offset else {
+                        for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                        continue
+                    }
                 }
-                else -> continue
+                else -> {
+                    for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                    continue
+                }
             }
 
             val isStatic = instr.opcode == Opcode.INVOKE_STATIC ||
                     instr.opcode == Opcode.INVOKE_STATIC_RANGE
             val paramIndex = if (isStatic) argIndex else argIndex - 1
-            if (paramIndex < 0) continue
+            if (paramIndex < 0) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
-            if (paramIndex >= ref.parameterTypes.size) continue
+            if (paramIndex >= ref.parameterTypes.size) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val paramType = ref.parameterTypes[paramIndex].toString()
-            if (paramType != "Ljava/lang/String;") continue
+            if (paramType != "Ljava/lang/String;") {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
-            val targetClass = classIndex[ref.definingClass] ?: continue
+            val targetClass = classIndex[ref.definingClass]
+            if (targetClass == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
             val targetMethod = targetClass.methods.find { m ->
                 m.name == ref.name &&
                         m.parameterTypes.size == ref.parameterTypes.size &&
                         m.parameterTypes.zip(ref.parameterTypes).all { (a, b) -> a.toString() == b.toString() }
-            } ?: continue
-            val impl = targetMethod.implementation ?: continue
+            }
+            if (targetMethod == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
+            val impl = targetMethod.implementation
+            if (impl == null) {
+                for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
+                continue
+            }
 
             val targetIsStatic = targetMethod.accessFlags and 0x0008 != 0
             val paramSlotOffset = if (targetIsStatic) 0 else 1
@@ -445,14 +623,31 @@ object ForwardValueScanner {
             val switchValues = scanStringSwitchValues(targetInstructions, 0, paramReg, targetCfgStrings)
             if (switchValues.isNotEmpty()) return switchValues
 
-            // Fallback: linear scan for direct equals comparisons
-            val scanResult = scanStringValues(targetInstructions, 0, paramReg, targetCfgStrings, window = 40)
+            // Fallback: CFG-aware scan for direct equals comparisons
+            val scanResult = scanStringValues(targetInstructions, 0, paramReg, targetCfgStrings, targetCfg.successors)
             if (scanResult.values.isNotEmpty()) return scanResult.values
+
+            // Continue BFS to find other potential call sites
+            for (s in successors[i]) { if (visited.add(s)) queue.add(s) }
         }
         return emptyList()
     }
 
     // --- Private helpers ---
+
+    /** Enqueue CFG successors with a tracked register into the BFS queue. */
+    private fun enqueueRegSuccessors(
+        queue: ArrayDeque<RegState>,
+        visited: MutableSet<RegState>,
+        successors: Array<IntArray>,
+        index: Int,
+        reg: Int
+    ) {
+        for (s in successors[index]) {
+            val state = RegState(s, reg)
+            if (visited.add(state)) queue.add(state)
+        }
+    }
 
     /**
      * Scan ALL remaining instructions for equals() on [stringReg].
@@ -499,9 +694,9 @@ object ForwardValueScanner {
     }
 
     /**
-     * Mini-scan for equals comparisons on a Uri component register (from getHost/getScheme/getPath).
-     * Searches within a short window for all comparisons involving [componentReg],
-     * qualifies them based on the component type, and adds to [values].
+     * CFG-aware mini-scan for equals comparisons on a Uri component register
+     * (from getHost/getScheme/getPath). Walks reachable instructions via [successors],
+     * qualifies values based on the component type, and adds to [values].
      */
     private fun collectUriComponentValues(
         values: MutableSet<String>,
@@ -509,41 +704,73 @@ object ForwardValueScanner {
         startIndex: Int,
         componentReg: Int,
         cfgStrings: Array<Map<Int, String>?>,
-        componentName: String
+        componentName: String,
+        successors: Array<IntArray>
     ) {
-        val limit = minOf(instructions.size, startIndex + 20)
-        for (i in startIndex until limit) {
+        val visited = mutableSetOf<Int>()
+        val queue = ArrayDeque<Int>()
+
+        if (startIndex in instructions.indices) {
+            queue.add(startIndex)
+            visited.add(startIndex)
+        }
+
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
             val instr = instructions[i]
-            if (instr.opcode in CONTROL_FLOW_STOPS) break
-            if (instr !is ReferenceInstruction || instr !is Instruction35c) continue
-            val ref = instr.reference
-            if (ref !is MethodReference) continue
 
-            val regStrings = cfgStrings[i] ?: continue
-
-            // String.equals / equalsIgnoreCase
-            if (ref.definingClass == "Ljava/lang/String;" &&
-                (ref.name == "equals" || ref.name == "equalsIgnoreCase")
+            // Stop this path if component register is overwritten
+            if (instr.opcode.setsRegister() && instr is OneRegisterInstruction &&
+                instr.registerA == componentReg
             ) {
-                extractComparedValue(instr, componentReg, regStrings)?.let {
-                    values.add(qualifyUriComponent(it, componentName))
+                continue
+            }
+
+            if (instr is ReferenceInstruction && instr is Instruction35c) {
+                val ref = instr.reference
+                if (ref is MethodReference) {
+                    val regStrings = cfgStrings[i]
+                    if (regStrings != null) {
+                        // String.equals / equalsIgnoreCase
+                        if (ref.definingClass == "Ljava/lang/String;" &&
+                            (ref.name == "equals" || ref.name == "equalsIgnoreCase")
+                        ) {
+                            extractComparedValue(instr, componentReg, regStrings)?.let {
+                                values.add(qualifyUriComponent(it, componentName))
+                            }
+                        }
+
+                        // TextUtils.equals
+                        if (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") {
+                            extractComparedValue(instr, componentReg, regStrings)?.let {
+                                values.add(qualifyUriComponent(it, componentName))
+                            }
+                        }
+
+                        // Objects.equals
+                        if (ref.name == "equals" && ref.parameterTypes.size == 2 &&
+                            ref.definingClass.endsWith("/Objects;")
+                        ) {
+                            extractComparedValue(instr, componentReg, regStrings)?.let {
+                                values.add(qualifyUriComponent(it, componentName))
+                            }
+                        }
+
+                        // Kotlin Intrinsics.areEqual
+                        if (ref.name == "areEqual" && ref.parameterTypes.size == 2 &&
+                            ref.definingClass == "Lkotlin/jvm/internal/Intrinsics;"
+                        ) {
+                            extractComparedValue(instr, componentReg, regStrings)?.let {
+                                values.add(qualifyUriComponent(it, componentName))
+                            }
+                        }
+                    }
                 }
             }
 
-            // TextUtils.equals
-            if (ref.definingClass == "Landroid/text/TextUtils;" && ref.name == "equals") {
-                extractComparedValue(instr, componentReg, regStrings)?.let {
-                    values.add(qualifyUriComponent(it, componentName))
-                }
-            }
-
-            // Objects.equals
-            if (ref.name == "equals" && ref.parameterTypes.size == 2 &&
-                ref.definingClass.endsWith("/Objects;")
-            ) {
-                extractComparedValue(instr, componentReg, regStrings)?.let {
-                    values.add(qualifyUriComponent(it, componentName))
-                }
+            // Enqueue successors
+            for (s in successors[i]) {
+                if (visited.add(s)) queue.add(s)
             }
         }
     }
@@ -583,11 +810,6 @@ object ForwardValueScanner {
         }
         return null
     }
-
-    private val CONTROL_FLOW_STOPS = setOf(
-        Opcode.RETURN_VOID, Opcode.RETURN, Opcode.RETURN_OBJECT, Opcode.RETURN_WIDE,
-        Opcode.THROW
-    )
 
     private val URI_COMPONENT_METHODS = setOf("getHost", "getScheme", "getPath")
 
