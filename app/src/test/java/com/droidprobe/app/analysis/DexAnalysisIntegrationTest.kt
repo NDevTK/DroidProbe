@@ -2437,4 +2437,5 @@ class DexAnalysisIntegrationTest {
             }
         }
     }
+
 }
