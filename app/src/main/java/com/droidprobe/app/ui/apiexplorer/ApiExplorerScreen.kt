@@ -1,5 +1,6 @@
 package com.droidprobe.app.ui.apiexplorer
 
+import com.droidprobe.app.ui.components.SuggestableTextField
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -76,9 +77,25 @@ fun ApiExplorerScreen(
     viewModel: ApiExplorerViewModel = viewModel(
         factory = run {
             val app = LocalContext.current.applicationContext as DroidProbeApplication
+            val pm = app.packageManager
+            @Suppress("DEPRECATION")
+            val certSha1 = try {
+                val sig = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    pm.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+                        .signingInfo?.apkContentsSigners?.firstOrNull()
+                } else {
+                    pm.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNATURES)
+                        .signatures?.firstOrNull()
+                }
+                sig?.let {
+                    val digest = java.security.MessageDigest.getInstance("SHA-1")
+                    digest.digest(it.toByteArray()).joinToString("") { b -> "%02x".format(b) }
+                }
+            } catch (_: Exception) { null }
             ApiExplorerViewModel.Factory(
                 packageName = packageName,
                 rootUrl = rootUrl,
+                certSha1 = certSha1,
                 fetcher = app.appModule.apiSpecFetcher,
                 analysisRepository = app.appModule.analysisRepository
             )
@@ -337,12 +354,15 @@ private fun ApiKeySelector(
                     val status = keyValidation[key]
                     DropdownMenuItem(
                         text = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.horizontalScroll(rememberScrollState())
+                            ) {
                                 if (status != null) {
                                     KeyStatusIcon(status)
                                     Spacer(modifier = Modifier.width(8.dp))
                                 }
-                                Text(maskKey(key), fontFamily = FontFamily.Monospace)
+                                Text(maskKey(key), fontFamily = FontFamily.Monospace, maxLines = 1)
                             }
                         },
                         onClick = {
@@ -454,10 +474,7 @@ private fun AutoExecuteResultCard(
     }
 }
 
-private fun maskKey(key: String): String {
-    if (key.length <= 12) return key
-    return key.take(8) + "..." + key.takeLast(4)
-}
+private fun maskKey(key: String): String = key
 
 @Composable
 private fun SourceBadge(source: String) {
@@ -661,16 +678,16 @@ private fun MethodDetail(
 
             for (param in sortedParams) {
                 val value = paramValues[param.name] ?: ""
-                OutlinedTextField(
+                val label = buildString {
+                    append(param.name)
+                    if (param.required) append(" *")
+                    append(" (${param.location})")
+                }
+                SuggestableTextField(
                     value = value,
                     onValueChange = { onParamChange(param.name, it) },
-                    label = {
-                        Text(buildString {
-                            append(param.name)
-                            if (param.required) append(" *")
-                            append(" (${param.location})")
-                        })
-                    },
+                    label = label,
+                    suggestedValues = param.enumValues,
                     supportingText = if (param.description.isNotEmpty()) {
                         {
                             Text(
@@ -679,9 +696,7 @@ private fun MethodDetail(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                    } else null,
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    } else null
                 )
             }
 

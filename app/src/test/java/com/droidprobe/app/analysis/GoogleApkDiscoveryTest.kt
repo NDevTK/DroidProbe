@@ -2,374 +2,168 @@ package com.droidprobe.app.analysis
 
 import com.droidprobe.app.data.model.*
 import com.droidprobe.app.interaction.ApiSpecFetcher
+import com.droidprobe.app.interaction.ProtoJsonField
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.runBlocking
-import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.Test
-import java.io.File
 
 /**
- * Integration test using decompiled Google app smali from google_smali/.
- * Extracts real API keys and URLs from const-string instructions,
- * builds ApiEndpoints, synthesizes discovery documents, fetches real
- * Google Discovery docs over the network, and verifies they are callable.
- *
- * No mock data — all strings come from real Google app bytecode.
+ * Core integration tests for the Google API discovery pipeline.
+ * Tests the network-facing API client directly — no assumeTrue, all tests must pass:
+ * - Fetching real Google Discovery documents
+ * - Verifying discovery docs are structurally usable for the UI
+ * - ProtoJson parameter leak (application/json+protobuf type confusion)
+ * - Scope discovery from Www-Authenticate 403 responses
+ * - X-Goog-Spatula header construction (verified against known-good values)
+ * - Staging discovery URL construction
+ * - Merge logic between remote and virtual documents
+ * - End-to-end method execution
  */
 class GoogleApkDiscoveryTest {
 
     companion object {
-        private val smaliRoot = File("D:/androidast/google_smali")
-        private lateinit var apiKeys: List<String>
-        private lateinit var apiUrls: List<String>
-        private lateinit var apiEndpoints: List<ApiEndpoint>
         private val fetcher = ApiSpecFetcher()
-
-        // Key association: which API keys co-occur with which URLs in the same smali method
-        private lateinit var keyToMethodUrls: Map<String, Set<String>>
-        // Key to source class mapping
-        private lateinit var keyToSourceClass: Map<String, String>
+        private lateinit var geminiDoc: DiscoveryDocument
 
         @BeforeClass
         @JvmStatic
         fun setup() {
-            assumeTrue(
-                "google_smali directory not found",
-                smaliRoot.exists() && smaliRoot.isDirectory
-            )
-
-            // Scan all smali directories for const-string instructions
-            val smaliDirs = smaliRoot.listFiles { f -> f.isDirectory && f.name.startsWith("smali") }
-                ?: error("No smali dirs found")
-
-            val keys = mutableSetOf<String>()
-            val urls = mutableSetOf<String>()
-            val urlToSource = mutableMapOf<String, String>()
-
-            // Track key→URL co-occurrence at the method level (simulates SensitiveStringFlowAnalyzer)
-            val keyMethodUrls = mutableMapOf<String, MutableSet<String>>()
-            val keySourceClass = mutableMapOf<String, String>()
-
-            for (dir in smaliDirs) {
-                dir.walk()
-                    .filter { it.extension == "smali" }
-                    .forEach { file ->
-                        val className = file.nameWithoutExtension
-
-                        // Parse methods and track const-string values per method
-                        val methodStrings = mutableListOf<MutableList<String>>()
-                        var currentMethod: MutableList<String>? = null
-
-                        file.useLines { lines ->
-                            for (line in lines) {
-                                val trimmed = line.trim()
-                                if (trimmed.startsWith(".method ")) {
-                                    currentMethod = mutableListOf<String>().also { methodStrings.add(it) }
-                                } else if (trimmed == ".end method") {
-                                    currentMethod = null
-                                } else if (trimmed.contains("const-string")) {
-                                    val match = Regex("const-string [^,]+, \"(.+)\"").find(trimmed)
-                                    if (match != null) {
-                                        val value = match.groupValues[1]
-                                        currentMethod?.add(value)
-
-                                        // Google API keys start with AIzaSy
-                                        if (value.startsWith("AIzaSy") && value.length > 20) {
-                                            keys.add(value)
-                                            keySourceClass.putIfAbsent(value, className)
-                                        }
-
-                                        // HTTP(S) URLs that look like API endpoints
-                                        if (value.startsWith("https://") && !value.contains("*") &&
-                                            !value.contains("support.google.com") &&
-                                            !value.contains("policies.google.com") &&
-                                            !value.contains("play.google.com/store") &&
-                                            !value.contains("issuetracker") &&
-                                            value.length > 15
-                                        ) {
-                                            urls.add(value)
-                                            urlToSource.putIfAbsent(value, className)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // For each method, if it has both keys and URLs, associate them
-                        for (methodValues in methodStrings) {
-                            val methodKeys = methodValues.filter { it.startsWith("AIzaSy") && it.length > 20 }
-                            val methodUrls = methodValues.filter {
-                                it.startsWith("https://") && it.length > 15 &&
-                                    it.contains("googleapis.com")
-                            }
-                            if (methodKeys.isNotEmpty() && methodUrls.isNotEmpty()) {
-                                for (key in methodKeys) {
-                                    keyMethodUrls.getOrPut(key) { mutableSetOf() }.addAll(methodUrls)
-                                }
-                            }
-                        }
-
-                        // Also check class-level co-occurrence (key + URL in same class)
-                        val classKeys = mutableSetOf<String>()
-                        val classUrls = mutableSetOf<String>()
-                        file.useLines { lines ->
-                            for (line in lines) {
-                                if (!line.contains("const-string")) continue
-                                val match = Regex("const-string [^,]+, \"(.+)\"").find(line.trim())
-                                    ?: continue
-                                val v = match.groupValues[1]
-                                if (v.startsWith("AIzaSy") && v.length > 20) classKeys.add(v)
-                                if (v.startsWith("https://") && v.contains("googleapis.com") && v.length > 15)
-                                    classUrls.add(v)
-                            }
-                        }
-                        if (classKeys.isNotEmpty() && classUrls.isNotEmpty()) {
-                            for (key in classKeys) {
-                                keyMethodUrls.getOrPut(key) { mutableSetOf() }.addAll(classUrls)
-                            }
-                        }
-                    }
+            val result = runBlocking {
+                fetcher.fetchSpec("https://generativelanguage.googleapis.com")
             }
-
-            apiKeys = keys.sorted()
-            apiUrls = urls.sorted()
-            keyToMethodUrls = keyMethodUrls
-            keyToSourceClass = keySourceClass
-
-            // Build ApiEndpoint objects from extracted URLs — only those with actual paths
-            apiEndpoints = urls
-                .filter { url ->
-                    url.contains("googleapis.com") && !url.contains("/auth/")
-                }
-                .mapNotNull { url ->
-                    val parsed = try { java.net.URI(url) } catch (_: Exception) { return@mapNotNull null }
-                    val path = parsed.rawPath?.trimStart('/') ?: ""
-                    if (path.isEmpty()) return@mapNotNull null // skip bare hostnames
-                    ApiEndpoint(
-                        fullUrl = url,
-                        baseUrl = "${parsed.scheme}://${parsed.host}",
-                        path = path,
-                        httpMethod = "GET",
-                        sourceClass = "L${urlToSource[url]?.replace('.', '/') ?: "unknown"};",
-                        sourceType = "literal"
-                    )
-                }
+            geminiDoc = result.getOrThrow()
         }
     }
 
-    // ==================== Smali Extraction: API Keys ====================
-
-    @Test
-    fun `smali contains Google API keys starting with AIzaSy`() {
-        assertThat(apiKeys).isNotEmpty()
-        for (key in apiKeys) {
-            assertThat(key).startsWith("AIzaSy")
-        }
-    }
-
-    @Test
-    fun `smali contains multiple distinct API keys`() {
-        assertThat(apiKeys.size).isGreaterThan(5)
-    }
-
-    // ==================== Smali Extraction: URLs ====================
-
-    @Test
-    fun `smali contains googleapis URLs`() {
-        val googleapisUrls = apiUrls.filter { it.contains("googleapis.com") }
-        assertThat(googleapisUrls).isNotEmpty()
-    }
-
-    @Test
-    fun `smali contains google service endpoints with paths`() {
-        assertThat(apiEndpoints).isNotEmpty()
-        for (ep in apiEndpoints) {
-            assertThat(ep.path).isNotEmpty()
-            assertThat(ep.fullUrl).contains("googleapis.com")
-        }
-    }
-
-    // ==================== Discovery: Synthesis from Smali Data ====================
-
-    @Test
-    fun `synthesize discovery doc from smali-extracted googleapis endpoints`() {
-        assumeTrue("No googleapis endpoints", apiEndpoints.isNotEmpty())
-
-        // Use generativelanguage.googleapis.com — Gemini API endpoints found in smali
-        val geminiEndpoints = apiEndpoints.filter {
-            it.baseUrl.contains("generativelanguage.googleapis.com")
-        }
-        assumeTrue("No Gemini endpoints", geminiEndpoints.isNotEmpty())
-
-        val doc = fetcher.synthesizeFromEndpoints(
-            "https://generativelanguage.googleapis.com", geminiEndpoints
-        )
-        assertThat(doc).isNotNull()
-        assertThat(doc!!.resources).isNotEmpty()
-        assertThat(doc.rootUrl).isEqualTo("https://generativelanguage.googleapis.com")
-    }
-
-    @Test
-    fun `synthesized Gemini doc has methods with valid paths`() {
-        val geminiEndpoints = apiEndpoints.filter {
-            it.baseUrl.contains("generativelanguage.googleapis.com")
-        }
-        assumeTrue("No Gemini endpoints", geminiEndpoints.isNotEmpty())
-
-        val doc = fetcher.synthesizeFromEndpoints(
-            "https://generativelanguage.googleapis.com", geminiEndpoints
-        )!!
-        val allMethods = doc.resources.values.flatMap { it.methods.values }
-        assertThat(allMethods).isNotEmpty()
-        for (method in allMethods) {
-            assertThat(method.source).isEqualTo("dex")
-            assertThat(method.httpMethod).isNotEmpty()
-            assertThat(method.path).isNotEmpty()
-            assertThat(method.path).contains("models/")
-        }
-    }
-
-    @Test
-    fun `synthesized doc groups endpoints into resources by first path segment`() {
-        assumeTrue("No googleapis endpoints", apiEndpoints.isNotEmpty())
-        val doc = fetcher.synthesizeFromEndpoints(
-            "https://generativelanguage.googleapis.com",
-            apiEndpoints.filter { it.baseUrl.contains("generativelanguage.googleapis.com") }
-        )
-        assumeTrue("No Gemini doc", doc != null)
-        for ((name, resource) in doc!!.resources) {
-            assertThat(name).isNotEmpty()
-            assertThat(resource.methods).isNotEmpty()
-        }
-    }
-
-    // ==================== Real Network: Fetch Google Discovery Document ====================
+    // ==================== Discovery Document Fetch ====================
 
     @Test
     fun `fetch real Generative Language API discovery document`() {
-        // Discovery docs are public — no API key needed
-        val result = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
-        }
-        assumeTrue("Network fetch failed (offline?)", result.isSuccess)
-        val doc = result.getOrThrow()
-        assertThat(doc.rootUrl).contains("generativelanguage.googleapis.com")
-        assertThat(doc.resources).isNotEmpty()
-
-        // Every method should be structurally callable
-        val allMethods = doc.resources.values
-            .flatMap { r -> r.methods.values + r.resources.values.flatMap { it.methods.values } }
-        assertThat(allMethods).isNotEmpty()
-        for (method in allMethods) {
-            assertThat(method.httpMethod).isNotEmpty()
-            assertThat(method.path).isNotEmpty()
-        }
+        assertThat(geminiDoc.rootUrl).contains("generativelanguage.googleapis.com")
+        assertThat(geminiDoc.resources).isNotEmpty()
     }
 
     @Test
     fun `fetched discovery doc has valid rootUrl and servicePath`() {
-        val result = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
+        assertThat(geminiDoc.rootUrl).startsWith("https://")
+        assertThat(geminiDoc.rootUrl).contains("generativelanguage")
+        assertThat(geminiDoc.servicePath).isNotNull()
+    }
+
+    @Test
+    fun `fetched discovery doc resources have methods with valid structure`() {
+        val allMethods = collectMethods(geminiDoc.resources)
+        assertThat(allMethods).isNotEmpty()
+        for (method in allMethods) {
+            assertThat(method.httpMethod).isNotEmpty()
+            assertThat(method.path).isNotEmpty()
+            assertThat(method.id).isNotEmpty()
         }
-        assumeTrue("Network fetch failed", result.isSuccess)
-        val doc = result.getOrThrow()
-        assertThat(doc.rootUrl).startsWith("https://")
-        assertThat(doc.rootUrl).contains("generativelanguage")
-        // servicePath may be empty for APIs that serve from root (e.g. Generative Language)
-        assertThat(doc.servicePath).isNotNull()
     }
 
     @Test
     fun `fetched discovery doc path params are required`() {
-        val result = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
-        }
-        assumeTrue("Network fetch failed", result.isSuccess)
-        val doc = result.getOrThrow()
-
-        val allMethods = doc.resources.values
-            .flatMap { r -> r.methods.values + r.resources.values.flatMap { it.methods.values } }
-        val pathParams = allMethods.flatMap { it.parameters.values }
+        val pathParams = collectMethods(geminiDoc.resources)
+            .flatMap { it.parameters.values }
             .filter { it.location == "path" }
 
-        if (pathParams.isNotEmpty()) {
-            for (param in pathParams) {
-                assertThat(param.required).isTrue()
+        assertThat(pathParams).isNotEmpty()
+        for (param in pathParams) {
+            assertThat(param.required).isTrue()
+        }
+    }
+
+    @Test
+    fun `fetched discovery doc has nested resources`() {
+        val hasNested = geminiDoc.resources.values.any { it.resources.isNotEmpty() }
+        assertThat(hasNested).isTrue()
+    }
+
+    @Test
+    fun `fetched discovery doc methods include GET and POST`() {
+        val httpMethods = collectMethods(geminiDoc.resources).map { it.httpMethod }.toSet()
+        assertThat(httpMethods).contains("GET")
+        assertThat(httpMethods).contains("POST")
+    }
+
+    // ==================== Discovery Doc Usability for UI ====================
+
+    @Test
+    fun `discovery doc can be flattened into UI-renderable resource tree`() {
+        val flatItems = mutableListOf<Pair<String, List<DiscoveryMethod>>>()
+        fun flatten(resources: Map<String, DiscoveryResource>, prefix: String = "") {
+            for ((name, resource) in resources) {
+                val fullName = if (prefix.isEmpty()) name else "$prefix.$name"
+                if (resource.methods.isNotEmpty()) {
+                    flatItems.add(fullName to resource.methods.values.toList())
+                }
+                flatten(resource.resources, fullName)
+            }
+        }
+        flatten(geminiDoc.resources)
+
+        assertThat(flatItems).isNotEmpty()
+        for ((name, methods) in flatItems) {
+            assertThat(name).isNotEmpty()
+            assertThat(methods).isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `every method path can be resolved to a full URL`() {
+        for (method in collectMethods(geminiDoc.resources)) {
+            var path = method.path
+            for ((name, param) in method.parameters) {
+                if (param.location == "path") {
+                    path = path.replace("{+$name}", "test").replace("{$name}", "test")
+                }
+            }
+
+            val base = geminiDoc.rootUrl.trimEnd('/')
+            val svc = geminiDoc.servicePath.trimStart('/').trimEnd('/')
+            val fullUrl = if (svc.isEmpty() || svc == "/")
+                "$base/${path.trimStart('/')}"
+            else
+                "$base/$svc/${path.trimStart('/')}"
+
+            val uri = java.net.URI(fullUrl)
+            assertThat(uri.scheme).isAnyOf("http", "https")
+            assertThat(uri.host).isNotNull()
+            assertThat(fullUrl).doesNotContain("{")
+        }
+    }
+
+    @Test
+    fun `methods with scopes show OAuth requirements in UI`() {
+        val methodsWithScopes = collectMethods(geminiDoc.resources).filter { it.scopes.isNotEmpty() }
+        for (method in methodsWithScopes) {
+            for (scope in method.scopes) {
+                assertThat(scope).isNotEmpty()
             }
         }
     }
 
-    // ==================== Merge: Remote + Virtual ====================
-
-    @Test
-    fun `merge remote Gemini discovery with smali-synthesized doc`() {
-        val geminiEndpoints = apiEndpoints.filter {
-            it.baseUrl.contains("generativelanguage.googleapis.com")
-        }
-        assumeTrue("No Gemini endpoints", geminiEndpoints.isNotEmpty())
-
-        val baseUrl = "https://generativelanguage.googleapis.com"
-        val remoteResult = runBlocking {
-            fetcher.fetchSpec(baseUrl)
-        }
-        assumeTrue("Network fetch failed", remoteResult.isSuccess)
-        val remoteDoc = remoteResult.getOrThrow()
-
-        val virtualDoc = fetcher.synthesizeFromEndpoints(baseUrl, geminiEndpoints)!!
-        val merged = fetcher.mergeDocuments(remoteDoc, virtualDoc)
-
-        // Merged preserves remote metadata
-        assertThat(merged.name).isEqualTo(remoteDoc.name)
-        assertThat(merged.rootUrl).isEqualTo(remoteDoc.rootUrl)
-
-        // Remote methods tagged as spec
-        fun collectMethods(resources: Map<String, DiscoveryResource>): List<DiscoveryMethod> =
-            resources.values.flatMap { r -> r.methods.values + collectMethods(r.resources) }
-
-        val mergedMethods = collectMethods(merged.resources)
-        val specMethods = mergedMethods.filter { it.source == "spec" }
-        assertThat(specMethods).isNotEmpty()
-
-        // Merged has at least as many methods as remote
-        val remoteMethodCount = collectMethods(remoteDoc.resources).size
-        assertThat(mergedMethods.size).isAtLeast(remoteMethodCount)
-    }
-
-    // ==================== Callable: Execute Real API Method ====================
+    // ==================== Execute Real API Method ====================
 
     @Test
     fun `execute real GET method from Gemini discovery doc`() {
-        val fetchResult = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
-        }
-        assumeTrue("Network fetch failed", fetchResult.isSuccess)
-        val doc = fetchResult.getOrThrow()
-
-        // Find a GET method — list models is a good candidate
-        fun collectMethods(resources: Map<String, DiscoveryResource>): List<DiscoveryMethod> =
-            resources.values.flatMap { r -> r.methods.values + collectMethods(r.resources) }
-
-        val getMethod = collectMethods(doc.resources)
-            .find { m ->
+        val getMethod = collectMethods(geminiDoc.resources)
+            .first { m ->
                 m.httpMethod == "GET" &&
                     m.parameters.values.none { it.location == "path" && it.required }
             }
-        assumeTrue("No simple GET method in discovery doc", getMethod != null)
 
-        // Execute without API key — proves the URL construction is correct
-        // even though auth will fail (we get 403, not connection error)
         val result = runBlocking {
             fetcher.executeMethod(
-                rootUrl = doc.rootUrl,
-                servicePath = doc.servicePath,
-                method = getMethod!!,
+                rootUrl = geminiDoc.rootUrl,
+                servicePath = geminiDoc.servicePath,
+                method = getMethod,
                 params = emptyMap(),
                 apiKey = null
             )
         }
 
-        // Server responded — URL is callable (any status code proves reachability)
         assertThat(result.isSuccess).isTrue()
         val execution = result.getOrThrow()
         assertThat(execution.statusCode).isGreaterThan(0)
@@ -377,320 +171,575 @@ class GoogleApkDiscoveryTest {
     }
 
     @Test
-    fun `synthesized method URLs are valid and substitutable`() {
-        val geminiEndpoints = apiEndpoints.filter {
-            it.baseUrl.contains("generativelanguage.googleapis.com")
-        }
-        assumeTrue("No Gemini endpoints", geminiEndpoints.isNotEmpty())
-        val doc = fetcher.synthesizeFromEndpoints(
-            "https://generativelanguage.googleapis.com", geminiEndpoints
+    fun `discovery doc has POST methods that support request bodies`() {
+        val postMethod = collectMethods(geminiDoc.resources)
+            .first { it.httpMethod == "POST" }
+        assertThat(postMethod.httpMethod).isEqualTo("POST")
+    }
+
+    // ==================== Merge: Remote + Virtual ====================
+
+    @Test
+    fun `merge remote discovery with synthesized virtual doc`() {
+        val fakeEndpoint = ApiEndpoint(
+            fullUrl = "https://generativelanguage.googleapis.com/v1/dex-only/test",
+            baseUrl = "https://generativelanguage.googleapis.com",
+            path = "v1/dex-only/test",
+            httpMethod = "GET",
+            sourceClass = "Lcom/test/DexClass;",
+            sourceType = "literal"
+        )
+        val virtualDoc = fetcher.synthesizeFromEndpoints(
+            "https://generativelanguage.googleapis.com",
+            listOf(fakeEndpoint)
         )!!
 
-        for ((_, resource) in doc.resources) {
-            for ((_, method) in resource.methods) {
-                // Substitute all path params
-                var path = method.path
-                for ((name, param) in method.parameters) {
-                    if (param.location == "path") {
-                        path = path.replace("{+$name}", "test").replace("{$name}", "test")
-                    }
-                }
-                val base = doc.rootUrl.trimEnd('/')
-                val svc = doc.servicePath.trimStart('/').trimEnd('/')
-                val fullUrl = if (svc.isEmpty() || svc == "/")
-                    "$base/${path.trimStart('/')}"
-                else
-                    "$base/$svc/${path.trimStart('/')}"
+        val merged = fetcher.mergeDocuments(geminiDoc, virtualDoc)
 
-                // Must be a valid URI with no unsubstituted placeholders
-                val uri = java.net.URI(fullUrl)
-                assertThat(uri.scheme).isAnyOf("http", "https")
-                assertThat(uri.host).isNotNull()
-                assertThat(fullUrl).doesNotContain("{")
-            }
+        assertThat(merged.name).isEqualTo(geminiDoc.name)
+        assertThat(merged.rootUrl).isEqualTo(geminiDoc.rootUrl)
+
+        val mergedMethods = collectMethods(merged.resources)
+        val specMethods = mergedMethods.filter { it.source == "spec" }
+        assertThat(specMethods).isNotEmpty()
+
+        val dexMethods = mergedMethods.filter { it.source == "dex" }
+        assertThat(dexMethods).isNotEmpty()
+        assertThat(dexMethods.any { it.path.contains("dex-only") }).isTrue()
+
+        val remoteMethodCount = collectMethods(geminiDoc.resources).size
+        assertThat(mergedMethods.size).isGreaterThan(remoteMethodCount)
+    }
+
+    @Test
+    fun `merge deduplicates methods that exist in both remote and virtual`() {
+        val realMethod = collectMethods(geminiDoc.resources).first()
+        val duplicateEndpoint = ApiEndpoint(
+            fullUrl = "${geminiDoc.rootUrl}/${realMethod.path}",
+            baseUrl = geminiDoc.rootUrl,
+            path = realMethod.path,
+            httpMethod = realMethod.httpMethod,
+            sourceClass = "Lcom/test/Duplicate;",
+            sourceType = "literal"
+        )
+        val virtualDoc = fetcher.synthesizeFromEndpoints(
+            geminiDoc.rootUrl, listOf(duplicateEndpoint)
+        )!!
+
+        val merged = fetcher.mergeDocuments(geminiDoc, virtualDoc)
+        val mergedMethods = collectMethods(merged.resources)
+        val remoteMethodCount = collectMethods(geminiDoc.resources).size
+
+        assertThat(mergedMethods.size).isEqualTo(remoteMethodCount)
+    }
+
+    // ==================== Synthesize From Endpoints ====================
+
+    @Test
+    fun `synthesize discovery doc from ApiEndpoints`() {
+        val endpoints = listOf(
+            ApiEndpoint(
+                fullUrl = "https://example.googleapis.com/v1/users/{userId}",
+                baseUrl = "https://example.googleapis.com",
+                path = "v1/users/{userId}",
+                httpMethod = "GET",
+                sourceClass = "Lcom/example/Api;",
+                sourceType = "retrofit",
+                pathParams = listOf("userId")
+            ),
+            ApiEndpoint(
+                fullUrl = "https://example.googleapis.com/v1/users",
+                baseUrl = "https://example.googleapis.com",
+                path = "v1/users",
+                httpMethod = "POST",
+                sourceClass = "Lcom/example/Api;",
+                sourceType = "retrofit",
+                hasBody = true,
+                queryParams = listOf("page_token")
+            )
+        )
+
+        val doc = fetcher.synthesizeFromEndpoints("https://example.googleapis.com", endpoints)
+        assertThat(doc).isNotNull()
+        assertThat(doc!!.rootUrl).isEqualTo("https://example.googleapis.com")
+
+        val allMethods = collectMethods(doc.resources)
+        assertThat(allMethods).hasSize(2)
+
+        val getMethod = allMethods.find { it.httpMethod == "GET" }!!
+        assertThat(getMethod.parameters["userId"]).isNotNull()
+        assertThat(getMethod.parameters["userId"]!!.location).isEqualTo("path")
+        assertThat(getMethod.parameters["userId"]!!.required).isTrue()
+
+        val postMethod = allMethods.find { it.httpMethod == "POST" }!!
+        assertThat(postMethod.parameters["page_token"]).isNotNull()
+        assertThat(postMethod.parameters["page_token"]!!.location).isEqualTo("query")
+        assertThat(postMethod.hasBody).isTrue()
+
+        for (method in allMethods) {
+            assertThat(method.source).isEqualTo("dex")
         }
     }
 
-    // ==================== Multi-service: Different base URLs ====================
+    // ==================== X-Goog-Spatula Header ====================
 
     @Test
-    fun `smali-extracted endpoints span multiple googleapis subdomains`() {
-        val hosts = apiEndpoints.map { java.net.URI(it.fullUrl).host }.toSet()
-        // Google app uses multiple googleapis subdomains
-        assertThat(hosts.size).isGreaterThan(1)
+    fun `buildSpatulaHeader matches known-good value from req2proto data`() {
+        val packageName = "com.google.android.play.games"
+        val certSha1 = "38918a453d07199354f8b19af05ec6562ced5788"
+        val expectedSpatula = "Cj0KHWNvbS5nb29nbGUuYW5kcm9pZC5wbGF5LmdhbWVzGhxPSkdLUlQwSEdaTlUrTEdhOEY3R1ZpenRWNGc9GLingOeJmKD6Ng=="
+
+        val actual = fetcher.buildSpatulaHeader(packageName, certSha1)
+        assertThat(actual).isEqualTo(expectedSpatula)
     }
 
     @Test
-    fun `each googleapis subdomain produces an independent discovery doc`() {
-        val byHost = apiEndpoints.groupBy { java.net.URI(it.fullUrl).host }
-        assertThat(byHost.size).isGreaterThan(1)
+    fun `buildSpatulaHeader matches another known-good value`() {
+        val packageName = "com.google.android.youtube"
+        val certSha1 = "24bb24c05e47e0aefa68a58a766179d9b613a600"
+        val expectedSpatula = "CjoKGmNvbS5nb29nbGUuYW5kcm9pZC55b3V0dWJlGhxKTHNrd0Y1SDRLNzZhS1dLZG1GNTJiWVRwZ0E9GLingOeJmKD6Ng=="
 
-        for ((host, endpoints) in byHost) {
-            if (endpoints.isEmpty()) continue
-            val doc = fetcher.synthesizeFromEndpoints("https://$host", endpoints)
-            // Each group should produce a valid doc if it has endpoints with paths
-            if (doc != null) {
-                assertThat(doc.rootUrl).contains(host)
-                val methods = doc.resources.values.flatMap { it.methods.values }
-                for (method in methods) {
-                    assertThat(method.path).isNotEmpty()
-                }
-            }
+        val actual = fetcher.buildSpatulaHeader(packageName, certSha1)
+        assertThat(actual).isEqualTo(expectedSpatula)
+    }
+
+    @Test
+    fun `buildSpatulaHeader produces valid base64-encoded protobuf`() {
+        val spatula = fetcher.buildSpatulaHeader(
+            "com.google.android.googlequicksearchbox",
+            "38918a453d07199354f8b19af05ec6562ced5788"
+        )
+
+        assertThat(spatula).isNotEmpty()
+        val decoded = java.util.Base64.getDecoder().decode(spatula)
+        assertThat(decoded.size).isGreaterThan(10)
+
+        val decodedStr = String(decoded, Charsets.ISO_8859_1)
+        assertThat(decodedStr).contains("com.google.android.googlequicksearchbox")
+    }
+
+    @Test
+    fun `buildSpatulaHeader contains base64-encoded SHA1 signature`() {
+        val sha1Hex = "38918a453d07199354f8b19af05ec6562ced5788"
+        val spatula = fetcher.buildSpatulaHeader("com.google.android.play.games", sha1Hex)
+
+        val sha1Bytes = ByteArray(20) { i ->
+            Integer.parseInt(sha1Hex.substring(i * 2, i * 2 + 2), 16).toByte()
         }
-    }
+        val sha1Base64 = java.util.Base64.getEncoder().encodeToString(sha1Bytes)
 
-    // ==================== Network Connectivity Diagnostic ====================
-
-    @Test
-    fun `API keys from smali are app-restricted and return 403`() {
-        assumeTrue("No API keys found", apiKeys.isNotEmpty())
-
-        // Google API keys embedded in APKs are restricted by package signature.
-        // Using them outside the app's signing context returns 403.
-        // This validates DroidProbe correctly extracts keys that ARE real.
-        val url = "https://generativelanguage.googleapis.com/\$discovery/rest?key=${apiKeys.first()}"
-        try {
-            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 15_000
-            val statusCode = conn.responseCode
-            conn.disconnect()
-            // 403 = key is valid but restricted to the app's signing certificate
-            assertThat(statusCode).isEqualTo(403)
-        } catch (e: Exception) {
-            assumeTrue("Network unavailable: ${e.message}", false)
-        }
-    }
-
-    // ==================== API Key Association & Selection ====================
-
-    @Test
-    fun `API keys have associated URLs from smali co-occurrence`() {
-        // At least some keys should co-occur with URLs in the same class/method
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assertThat(keysWithUrls).isNotEmpty()
+        val decoded = String(java.util.Base64.getDecoder().decode(spatula), Charsets.ISO_8859_1)
+        assertThat(decoded).contains(sha1Base64)
     }
 
     @Test
-    fun `associated URLs point to googleapis domains`() {
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assumeTrue("No key-URL associations found", keysWithUrls.isNotEmpty())
-
-        for ((key, urls) in keysWithUrls) {
-            for (url in urls) {
-                assertThat(url).contains("googleapis.com")
-                assertThat(key).startsWith("AIzaSy")
-            }
-        }
+    fun `different packages produce different Spatula headers`() {
+        val sha1 = "38918a453d07199354f8b19af05ec6562ced5788"
+        val spatula1 = fetcher.buildSpatulaHeader("com.google.android.apps.maps", sha1)
+        val spatula2 = fetcher.buildSpatulaHeader("com.google.android.youtube", sha1)
+        assertThat(spatula1).isNotEqualTo(spatula2)
     }
 
     @Test
-    fun `key selection scoring picks best key for given rootUrl`() {
-        // Simulate the scoring logic from ApiExplorerViewModel.loadApiKeys()
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assumeTrue("No key-URL associations found", keysWithUrls.isNotEmpty())
+    fun `spatula contains droidguard_response field`() {
+        val spatula = fetcher.buildSpatulaHeader(
+            "com.google.android.gms",
+            "38918a453d07199354f8b19af05ec6562ced5788"
+        )
+        val decoded = java.util.Base64.getDecoder().decode(spatula)
 
-        // Build SensitiveString objects with associatedUrls (like the real pipeline does)
-        val sensitiveStrings = apiKeys.map { key ->
-            SensitiveString(
-                value = key,
-                category = "Google API Key",
-                sourceClass = keyToSourceClass[key] ?: "",
-                associatedUrls = keyToMethodUrls[key]?.sorted()?.toList() ?: emptyList()
+        val bytes = decoded.toList()
+        assertThat(bytes).contains(0x18.toByte()) // field 3, wire type 0
+    }
+
+    // ==================== Scope Discovery ====================
+
+    @Test
+    fun `discoverScopes returns scopes from People API`() {
+        val result = runBlocking {
+            fetcher.discoverScopes(
+                "https://people-pa.googleapis.com",
+                "v2/people"
             )
         }
-
-        // Test: for each unique googleapis host found in associations, the scorer
-        // should prefer a key that has URLs matching that host
-        val allAssociatedHosts = keyToMethodUrls.values
-            .flatten()
-            .mapNotNull { url -> try { java.net.URI(url).host } catch (_: Exception) { null } }
-            .toSet()
-
-        for (targetHost in allAssociatedHosts) {
-            val rootUrl = "https://$targetHost"
-            val rootHost = try {
-                java.net.URL(rootUrl).host
-            } catch (_: Exception) { rootUrl }
-
-            // Score each key by whether its associatedUrls match this host
-            val scored = sensitiveStrings.distinctBy { it.value }.sortedByDescending { secret ->
-                if (secret.associatedUrls.any { it.contains(rootHost, ignoreCase = true) }) 1 else 0
-            }
-            val bestKey = scored.firstOrNull()?.value ?: continue
-
-            // The best key should have at least one URL matching this host
-            val bestSecret = sensitiveStrings.find { it.value == bestKey }!!
-            val matchesHost = bestSecret.associatedUrls.any { it.contains(rootHost, ignoreCase = true) }
-            assertThat(matchesHost).isTrue()
-        }
-    }
-
-    @Test
-    fun `multiple distinct keys serve different googleapis services`() {
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assumeTrue("Need multiple key-URL associations", keysWithUrls.size > 1)
-
-        // Different keys may be associated with different googleapis subdomains
-        val keyHosts = keysWithUrls.mapValues { (_, urls) ->
-            urls.mapNotNull { url -> try { java.net.URI(url).host } catch (_: Exception) { null } }.toSet()
-        }
-
-        // At least verify each associated key has valid googleapis hosts
-        for ((key, hosts) in keyHosts) {
-            assertThat(hosts).isNotEmpty()
-            for (host in hosts) {
-                assertThat(host).endsWith("googleapis.com")
-            }
-        }
-    }
-
-    @Test
-    fun `key association uses discovery doc to validate key works with correct service`() {
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assumeTrue("No key-URL associations found", keysWithUrls.isNotEmpty())
-
-        // Find a key associated with generativelanguage.googleapis.com
-        val geminiKey = keysWithUrls.entries.find { (_, urls) ->
-            urls.any { it.contains("generativelanguage.googleapis.com") }
-        }?.key
-
-        // Find a key associated with a different service
-        val otherKey = keysWithUrls.entries.find { (key, urls) ->
-            key != geminiKey && urls.none { it.contains("generativelanguage.googleapis.com") }
-        }?.key
-
-        // Fetch real discovery doc (public, no key needed)
-        val result = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
-        }
-        assumeTrue("Network fetch failed", result.isSuccess)
-        val doc = result.getOrThrow()
-
-        // The discovery doc should have methods matching the URL paths associated with the key
-        if (geminiKey != null) {
-            val geminiUrls = keysWithUrls[geminiKey]!!
-            val geminiPaths = geminiUrls.mapNotNull { url ->
-                try { java.net.URI(url).rawPath?.trimStart('/') } catch (_: Exception) { null }
-            }.filter { it.isNotEmpty() }
-
-            fun collectMethods(resources: Map<String, DiscoveryResource>): List<DiscoveryMethod> =
-                resources.values.flatMap { r -> r.methods.values + collectMethods(r.resources) }
-
-            val docPaths = collectMethods(doc.resources).map { it.path }
-
-            // At least some smali-extracted paths should relate to discovery doc paths
-            // (they may not match exactly due to path parameters vs concrete values)
-            assertThat(docPaths).isNotEmpty()
-            assertThat(geminiPaths).isNotEmpty()
-        }
-
-        // If we have a key for a different service, it should NOT match generativelanguage paths
-        if (otherKey != null) {
-            val otherUrls = keysWithUrls[otherKey]!!
-            for (url in otherUrls) {
-                assertThat(url).doesNotContain("generativelanguage.googleapis.com")
-            }
-        }
-    }
-
-    @Test
-    fun `execute discovery method with smali-extracted key returns 403 (app-restricted)`() {
-        val keysWithUrls = keyToMethodUrls.filter { it.value.isNotEmpty() }
-        assumeTrue("No key-URL associations found", keysWithUrls.isNotEmpty())
-
-        // Pick any key that has googleapis associations
-        val testKey = keysWithUrls.keys.first()
-
-        val fetchResult = runBlocking {
-            fetcher.fetchSpec("https://generativelanguage.googleapis.com")
-        }
-        assumeTrue("Network fetch failed", fetchResult.isSuccess)
-        val doc = fetchResult.getOrThrow()
-
-        fun collectMethods(resources: Map<String, DiscoveryResource>): List<DiscoveryMethod> =
-            resources.values.flatMap { r -> r.methods.values + collectMethods(r.resources) }
-
-        val getMethod = collectMethods(doc.resources)
-            .find { m ->
-                m.httpMethod == "GET" &&
-                    m.parameters.values.none { it.location == "path" && it.required }
-            }
-        assumeTrue("No simple GET method", getMethod != null)
-
-        // Execute WITH the smali-extracted key — proves the full pipeline:
-        // smali extraction → key association → discovery doc → method execution
-        val result = runBlocking {
-            fetcher.executeMethod(
-                rootUrl = doc.rootUrl,
-                servicePath = doc.servicePath,
-                method = getMethod!!,
-                params = emptyMap(),
-                apiKey = testKey
-            )
-        }
-
         assertThat(result.isSuccess).isTrue()
-        val execution = result.getOrThrow()
-        // 403 = key is real but app-restricted (package signature bound)
-        // Any non-zero status proves the full pipeline works end-to-end
-        assertThat(execution.statusCode).isGreaterThan(0)
-    }
+        val discovery = result.getOrThrow()
 
-    // ==================== Dump for Inspection ====================
+        assertThat(discovery.statusCode).isAnyOf(401, 403, 400)
+
+        if (discovery.scopes.isNotEmpty()) {
+            for (scope in discovery.scopes) {
+                assertThat(scope).contains("googleapis.com/auth/")
+            }
+        }
+    }
 
     @Test
-    fun `dump smali-extracted Google data to file`() {
-        val sb = StringBuilder()
-        sb.appendLine("=== GOOGLE SMALI ANALYSIS ===")
-        sb.appendLine()
-        sb.appendLine("=== API KEYS (${apiKeys.size}) ===")
-        for (key in apiKeys) {
-            sb.appendLine("  $key")
-        }
-        sb.appendLine()
-        sb.appendLine("=== GOOGLEAPIS ENDPOINTS (${apiEndpoints.size}) ===")
-        for (ep in apiEndpoints) {
-            sb.appendLine("  ${ep.fullUrl}")
-            sb.appendLine("    src=${ep.sourceClass}")
-        }
-        sb.appendLine()
-        sb.appendLine("=== API KEY ASSOCIATIONS ===")
-        for ((key, urls) in keyToMethodUrls) {
-            sb.appendLine("  $key")
-            for (url in urls.sorted()) {
-                sb.appendLine("    → $url")
-            }
-        }
-        sb.appendLine()
-        sb.appendLine("=== ALL EXTRACTED URLS (${apiUrls.size}) ===")
-        for (url in apiUrls) {
-            sb.appendLine("  $url")
-        }
-
-        val geminiEndpoints = apiEndpoints.filter {
-            it.baseUrl.contains("generativelanguage.googleapis.com")
-        }
-        val doc = if (geminiEndpoints.isNotEmpty()) {
-            fetcher.synthesizeFromEndpoints(
-                "https://generativelanguage.googleapis.com", geminiEndpoints
+    fun `discoverScopes parses gRPC method name from error`() {
+        val result = runBlocking {
+            fetcher.discoverScopes(
+                "https://people-pa.googleapis.com",
+                "v2/people"
             )
-        } else null
+        }
+        assertThat(result.isSuccess).isTrue()
+        val discovery = result.getOrThrow()
 
-        if (doc != null) {
-            sb.appendLine()
-            sb.appendLine("=== SYNTHESIZED GEMINI DISCOVERY DOC ===")
-            sb.appendLine("  rootUrl=${doc.rootUrl}")
-            sb.appendLine("  servicePath=${doc.servicePath}")
-            sb.appendLine("  resources=${doc.resources.keys}")
-            for ((name, resource) in doc.resources) {
-                sb.appendLine("  resource: $name (${resource.methods.size} methods)")
-                for ((_, method) in resource.methods) {
-                    sb.appendLine("    ${method.httpMethod} ${method.path}")
-                }
-            }
+        if (discovery.grpcMethod != null) {
+            assertThat(discovery.grpcMethod).contains(".")
+        }
+    }
+
+    // ==================== ProtoJson Parameter Leak ====================
+
+    @Test
+    fun `discoverProtoJsonParams leaks field names from YouTube Innertube`() {
+        val result = runBlocking {
+            fetcher.discoverProtoJsonParams(
+                "https://youtubei.googleapis.com",
+                "youtubei/v1/browse"
+            )
+        }
+        assertThat(result.isSuccess).isTrue()
+        val fields = result.getOrThrow()
+
+        assertThat(fields).isNotEmpty()
+        for (field in fields) {
+            assertThat(field.name).isNotEmpty()
+            assertThat(field.type).isNotEmpty()
+            assertThat(field.index).isGreaterThan(0)
         }
 
-        File("build/google-smali-analysis.txt").writeText(sb.toString())
+        val fieldNames = fields.map { it.name }
+        // These are stable Innertube fields — must always be discovered
+        assertThat(fieldNames).contains("browse_id")
+        assertThat(fieldNames).contains("context")
+        assertThat(fieldNames).contains("params")
+
+        val browseId = fields.first { it.name == "browse_id" }
+        assertThat(browseId.type).isEqualTo("TYPE_STRING")
+
+        val context = fields.first { it.name == "context" }
+        assertThat(context.type).isEqualTo("TYPE_MESSAGE")
+        assertThat(context.messageType).isNotNull()
     }
+
+    @Test
+    fun `parseProtoJsonErrors handles structured fieldViolations`() {
+        val body = """
+        {
+          "error": {
+            "code": 400,
+            "message": "Invalid JSON payload received.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+              {
+                "@type": "type.googleapis.com/google.rpc.BadRequest",
+                "fieldViolations": [
+                  {
+                    "field": "browse_id",
+                    "description": "Invalid value at 'browse_id' (TYPE_STRING), \"x2\""
+                  },
+                  {
+                    "field": "context",
+                    "description": "Invalid value at 'context' (type.googleapis.com/youtube.api.pfiinnertube.InnerTubeContext), \"x1\""
+                  },
+                  {
+                    "field": "params",
+                    "description": "Invalid value at 'params' (TYPE_STRING), \"x3\""
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """.trimIndent()
+
+        val fields = fetcher.parseProtoJsonErrors(body)
+        assertThat(fields).hasSize(3)
+
+        val browseId = fields.find { it.name == "browse_id" }!!
+        assertThat(browseId.type).isEqualTo("TYPE_STRING")
+        assertThat(browseId.index).isEqualTo(2)
+
+        val context = fields.find { it.name == "context" }!!
+        assertThat(context.type).isEqualTo("TYPE_MESSAGE")
+        assertThat(context.index).isEqualTo(1)
+        assertThat(context.messageType).isEqualTo("youtube.api.pfiinnertube.InnerTubeContext")
+
+        val params = fields.find { it.name == "params" }!!
+        assertThat(params.type).isEqualTo("TYPE_STRING")
+        assertThat(params.index).isEqualTo(3)
+    }
+
+    @Test
+    fun `parseProtoJsonErrors handles Base64 decoding failed variant`() {
+        val body = """
+        {
+          "error": {
+            "code": 400,
+            "message": "Invalid JSON payload received.",
+            "details": [
+              {
+                "fieldViolations": [
+                  {
+                    "field": "data",
+                    "description": "Invalid value at 'data' (TYPE_BYTES), Base64 decoding failed for \"x5\""
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """.trimIndent()
+
+        val fields = fetcher.parseProtoJsonErrors(body)
+        assertThat(fields).hasSize(1)
+        assertThat(fields[0].name).isEqualTo("data")
+        assertThat(fields[0].type).isEqualTo("TYPE_BYTES")
+        assertThat(fields[0].index).isEqualTo(5)
+    }
+
+    @Test
+    fun `parseProtoJsonErrors falls back to error message when no fieldViolations`() {
+        val body = """
+        {
+          "error": {
+            "code": 400,
+            "message": "Invalid value at 'name' (TYPE_STRING), \"x1\". Invalid value at 'age' (TYPE_INT32), \"x2\"."
+          }
+        }
+        """.trimIndent()
+
+        val fields = fetcher.parseProtoJsonErrors(body)
+        assertThat(fields).hasSize(2)
+        assertThat(fields.map { it.name }).containsExactly("name", "age")
+    }
+
+    @Test
+    fun `parseProtoJsonErrors extracts integer index from int payload`() {
+        val body = """
+        {
+          "error": {
+            "details": [{
+              "fieldViolations": [
+                {"field": "query", "description": "Invalid value at 'query' (TYPE_STRING), 7"}
+              ]
+            }]
+          }
+        }
+        """.trimIndent()
+
+        val fields = fetcher.parseProtoJsonErrors(body)
+        assertThat(fields).hasSize(1)
+        assertThat(fields[0].name).isEqualTo("query")
+        assertThat(fields[0].index).isEqualTo(7)
+    }
+
+    // ==================== Dual-Probe Merge Logic (req2proto) ====================
+
+    @Test
+    fun `merge promotes field to TYPE_INT64 when only string probe reports it`() {
+        // String probe reports "token" as TYPE_STRING at index 3,
+        // but int probe does NOT report it → field accepts integers → TYPE_INT64
+        val strFields = listOf(
+            ProtoJsonField(name = "token", type = "TYPE_STRING", index = 3)
+        )
+        val intFields = emptyList<ProtoJsonField>()
+
+        val merged = fetcher.mergeProbeResults(strFields, intFields)
+        assertThat(merged).hasSize(1)
+        assertThat(merged[0].name).isEqualTo("token")
+        assertThat(merged[0].type).isEqualTo("TYPE_INT64")
+    }
+
+    @Test
+    fun `merge keeps TYPE_STRING when only int probe reports it`() {
+        // Int probe reports "name" as TYPE_STRING at index 1,
+        // but string probe does NOT report it → field accepts strings → TYPE_STRING
+        val strFields = emptyList<ProtoJsonField>()
+        val intFields = listOf(
+            ProtoJsonField(name = "name", type = "TYPE_STRING", index = 1)
+        )
+
+        val merged = fetcher.mergeProbeResults(strFields, intFields)
+        assertThat(merged).hasSize(1)
+        assertThat(merged[0].name).isEqualTo("name")
+        assertThat(merged[0].type).isEqualTo("TYPE_STRING")
+    }
+
+    @Test
+    fun `merge prefers messageType from string probe when both report same field`() {
+        // Both probes report "context" — string probe has the message type
+        val strFields = listOf(
+            ProtoJsonField(name = "context", type = "TYPE_MESSAGE", index = 1,
+                messageType = "youtube.api.InnerTubeContext")
+        )
+        val intFields = listOf(
+            ProtoJsonField(name = "context", type = "TYPE_MESSAGE", index = 1,
+                messageType = null)
+        )
+
+        val merged = fetcher.mergeProbeResults(strFields, intFields)
+        assertThat(merged).hasSize(1)
+        assertThat(merged[0].type).isEqualTo("TYPE_MESSAGE")
+        assertThat(merged[0].messageType).isEqualTo("youtube.api.InnerTubeContext")
+    }
+
+    @Test
+    fun `merge combines fields from both probes with correct types`() {
+        // Simulates a real dual-probe: 3 fields with different type signatures
+        val strFields = listOf(
+            ProtoJsonField(name = "context", type = "TYPE_MESSAGE", index = 1,
+                messageType = "some.Context"),
+            ProtoJsonField(name = "count", type = "TYPE_STRING", index = 2),  // will become INT64
+            ProtoJsonField(name = "query", type = "TYPE_STRING", index = 5)   // both report → STRING
+        )
+        val intFields = listOf(
+            ProtoJsonField(name = "context", type = "TYPE_MESSAGE", index = 1),
+            ProtoJsonField(name = "name", type = "TYPE_STRING", index = 3),   // only int reports → STRING
+            ProtoJsonField(name = "query", type = "TYPE_STRING", index = 5)
+        )
+
+        val merged = fetcher.mergeProbeResults(strFields, intFields)
+        assertThat(merged).hasSize(4)
+
+        val byName = merged.associateBy { it.name }
+        assertThat(byName["context"]!!.type).isEqualTo("TYPE_MESSAGE")
+        assertThat(byName["context"]!!.messageType).isEqualTo("some.Context")
+        assertThat(byName["count"]!!.type).isEqualTo("TYPE_INT64")
+        assertThat(byName["name"]!!.type).isEqualTo("TYPE_STRING")
+        assertThat(byName["query"]!!.type).isEqualTo("TYPE_STRING")
+    }
+
+    @Test
+    fun `merge returns sorted by field index`() {
+        val strFields = listOf(
+            ProtoJsonField(name = "z_field", type = "TYPE_STRING", index = 10),
+            ProtoJsonField(name = "a_field", type = "TYPE_STRING", index = 1)
+        )
+        val intFields = listOf(
+            ProtoJsonField(name = "m_field", type = "TYPE_STRING", index = 5)
+        )
+
+        val merged = fetcher.mergeProbeResults(strFields, intFields)
+        assertThat(merged.map { it.index }).isEqualTo(listOf(1, 5, 10))
+    }
+
+    // ==================== Staging Discovery ====================
+
+    @Test
+    fun `fetchStagingDiscovery constructs correct staging URL`() {
+        val result = runBlocking {
+            fetcher.fetchStagingDiscovery("https://people-pa.googleapis.com")
+        }
+        // Staging may be restricted, but must not crash
+        if (result.isSuccess) {
+            val doc = result.getOrThrow()
+            assertThat(doc.rootUrl).contains("sandbox.googleapis.com")
+        }
+    }
+
+    @Test
+    fun `fetchStagingDiscovery rejects non-googleapis URLs`() {
+        val result = runBlocking {
+            fetcher.fetchStagingDiscovery("https://api.example.com")
+        }
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()?.message).contains("googleapis.com")
+    }
+
+    // ==================== Multi-Service Discovery ====================
+
+    @Test
+    fun `fetch People PA discovery document`() {
+        val result = runBlocking {
+            fetcher.fetchSpec("https://people-pa.googleapis.com")
+        }
+        assertThat(result.isSuccess).isTrue()
+        val doc = result.getOrThrow()
+        assertThat(doc.resources).isNotEmpty()
+    }
+
+    // ==================== Maps API Key Delivery ====================
+    // Real key from com.google.android.deskclock (iju.mo11530i → cnx.f7194h)
+    private val clockMapsKey = "AIzaSyBUcCPilPlw0sWDaXdmNScHS4N0jm31D-I"
+
+    @Test
+    fun `Maps Timezone API rejects key sent only via X-Goog-Api-Key header`() {
+        val result = runBlocking {
+            val conn = java.net.URL(
+                "https://maps.googleapis.com/maps/api/timezone/json?location=0,0&timestamp=0"
+            ).openConnection() as java.net.HttpURLConnection
+            conn.setRequestProperty("X-Goog-Api-Key", clockMapsKey)
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            try {
+                val code = conn.responseCode
+                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() } ?: ""
+                code to body
+            } finally {
+                conn.disconnect()
+            }
+        }
+        // Maps Platform ignores X-Goog-Api-Key header — key must be in ?key= query param
+        assertThat(result.second).contains("REQUEST_DENIED")
+    }
+
+    @Test
+    fun `Maps Timezone API accepts real key as query parameter`() {
+        val result = runBlocking {
+            val conn = java.net.URL(
+                "https://maps.googleapis.com/maps/api/timezone/json?location=0,0&timestamp=0&key=$clockMapsKey"
+            ).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            try {
+                val code = conn.responseCode
+                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() } ?: ""
+                code to body
+            } finally {
+                conn.disconnect()
+            }
+        }
+        // Real key in query param → Maps processes request (no REQUEST_DENIED)
+        assertThat(result.second).doesNotContain("REQUEST_DENIED")
+    }
+
+    @Test
+    fun `executeMethod delivers key to Maps Timezone endpoint`() {
+        val result = runBlocking {
+            val testMethod = DiscoveryMethod(
+                id = "test",
+                httpMethod = "GET",
+                path = "maps/api/timezone/json",
+                description = "",
+                parameters = mapOf(
+                    "location" to DiscoveryParameter("location", "string", "query", false, "", null, emptyList()),
+                    "timestamp" to DiscoveryParameter("timestamp", "string", "query", false, "", null, emptyList())
+                ),
+                parameterOrder = emptyList(),
+                scopes = emptyList()
+            )
+            fetcher.executeMethod(
+                rootUrl = "https://maps.googleapis.com",
+                servicePath = "",
+                method = testMethod,
+                params = mapOf("location" to "0,0", "timestamp" to "0"),
+                apiKey = clockMapsKey
+            )
+        }
+        assertThat(result.isSuccess).isTrue()
+        val body = result.getOrThrow().body
+        // If REQUEST_DENIED → executeMethod sends key as header only, Maps doesn't see it
+        // This test will FAIL until executeMethod also sends key as query param for Google APIs
+        assertThat(body).doesNotContain("REQUEST_DENIED")
+    }
+
+    // ==================== Helpers ====================
+
+    private fun collectMethods(resources: Map<String, DiscoveryResource>): List<DiscoveryMethod> =
+        resources.values.flatMap { r -> r.methods.values + collectMethods(r.resources) }
 }

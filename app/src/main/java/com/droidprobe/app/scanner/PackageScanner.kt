@@ -1,8 +1,10 @@
 package com.droidprobe.app.scanner
 
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import com.droidprobe.app.data.model.AppInfo
+import java.security.MessageDigest
 
 class PackageScanner(private val packageManager: PackageManager) {
 
@@ -30,7 +32,33 @@ class PackageScanner(private val packageManager: PackageManager) {
             },
             targetSdk = targetSdkVersion,
             minSdk = minSdkVersion,
-            uid = uid
+            uid = uid,
+            certSha1 = extractCertSha1(packageName)
         )
+    }
+
+    /**
+     * Extract the SHA1 fingerprint of the app's signing certificate.
+     * Used for constructing X-Goog-Spatula headers and identifying
+     * the Google Cloud project context for Android API authentication.
+     */
+    @Suppress("DEPRECATION")
+    private fun extractCertSha1(pkg: String): String? {
+        return try {
+            val signingInfo = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                val pi = packageManager.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+                pi.signingInfo?.apkContentsSigners?.firstOrNull()
+            } else {
+                val pi = packageManager.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+                pi.signatures?.firstOrNull()
+            }
+            if (signingInfo != null) {
+                val digest = MessageDigest.getInstance("SHA-1")
+                val sha1 = digest.digest(signingInfo.toByteArray())
+                sha1.joinToString("") { "%02x".format(it) }
+            } else null
+        } catch (_: Exception) {
+            null
+        }
     }
 }

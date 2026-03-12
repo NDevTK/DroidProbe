@@ -2781,4 +2781,165 @@ class DexAnalysisIntegrationTest {
         }
     }
 
+    // ==================== String.format() URL Detection ====================
+
+    @Test
+    fun `String format URL detected for maps timezone API`() {
+        val sfEndpoints = analysis.apiEndpoints.filter { it.sourceType == "string_format" }
+        val timezone = sfEndpoints.find { it.fullUrl.contains("maps.googleapis.com") && it.path.contains("timezone") }
+        assertThat(timezone).isNotNull()
+        assertThat(timezone!!.baseUrl).isEqualTo("https://maps.googleapis.com")
+        assertThat(timezone.path).isEqualTo("/maps/api/timezone/json")
+    }
+
+    @Test
+    fun `String format URL extracts query param names from format template`() {
+        val sfEndpoints = analysis.apiEndpoints.filter { it.sourceType == "string_format" }
+        val timezone = sfEndpoints.first { it.path.contains("timezone") }
+        assertThat(timezone.queryParams).containsExactly("location", "timestamp", "key")
+    }
+
+    @Test
+    fun `String format URL detected for geocode API`() {
+        val sfEndpoints = analysis.apiEndpoints.filter { it.sourceType == "string_format" }
+        val geocode = sfEndpoints.find { it.path.contains("geocode") }
+        assertThat(geocode).isNotNull()
+        assertThat(geocode!!.path).isEqualTo("/maps/api/geocode/json")
+        assertThat(geocode.queryParams).containsExactly("address", "key")
+    }
+
+    @Test
+    fun `String format URL defaults to GET method`() {
+        val sfEndpoints = analysis.apiEndpoints.filter { it.sourceType == "string_format" }
+        assertThat(sfEndpoints).isNotEmpty()
+        for (ep in sfEndpoints) {
+            assertThat(ep.httpMethod).isEqualTo("GET")
+        }
+    }
+
+    // ==================== Uri.Builder URL Detection ====================
+
+    @Test
+    fun `Uri Builder detects places nearbysearch endpoint`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val places = ubEndpoints.find { it.path.contains("place") && it.path.contains("nearbysearch") }
+        assertThat(places).isNotNull()
+        assertThat(places!!.baseUrl).isEqualTo("https://maps.googleapis.com")
+        assertThat(places.path).contains("maps/api/place")
+        assertThat(places.path).contains("nearbysearch/json")
+    }
+
+    @Test
+    fun `Uri Builder extracts query param names`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val places = ubEndpoints.find { it.path.contains("nearbysearch") }
+        assertThat(places).isNotNull()
+        assertThat(places!!.queryParams).containsAtLeast("key", "language", "radius")
+    }
+
+    @Test
+    fun `Uri Builder detects directions endpoint`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val directions = ubEndpoints.find { it.path.contains("directions") }
+        assertThat(directions).isNotNull()
+        assertThat(directions!!.baseUrl).isEqualTo("https://maps.googleapis.com")
+        assertThat(directions.queryParams).containsAtLeast("origin", "destination", "key")
+    }
+
+    @Test
+    fun `Uri Builder defaults to GET method`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        assertThat(ubEndpoints).isNotEmpty()
+        for (ep in ubEndpoints) {
+            assertThat(ep.httpMethod).isEqualTo("GET")
+        }
+    }
+
+    // ==================== Uri.Builder Abstract Method Resolution ====================
+
+    @Test
+    fun `Uri Builder resolves abstract method return values from subclasses`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val details = ubEndpoints.find { it.path.contains("details/json") }
+        assertThat(details).isNotNull()
+        assertThat(details!!.baseUrl).isEqualTo("https://places.googleapis.com")
+        assertThat(details.path).contains("v1/places/details/json")
+    }
+
+    @Test
+    fun `Uri Builder resolves autocomplete subclass endpoint`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val autocomplete = ubEndpoints.find { it.path.contains("autocomplete/json") }
+        assertThat(autocomplete).isNotNull()
+        assertThat(autocomplete!!.baseUrl).isEqualTo("https://places.googleapis.com")
+    }
+
+    @Test
+    fun `Uri Builder extracts subclass query params from Map put`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val details = ubEndpoints.find { it.path.contains("details/json") }
+        assertThat(details).isNotNull()
+        // Base class adds "key", subclass adds "placeid" and "fields"
+        assertThat(details!!.queryParams).containsAtLeast("key", "placeid", "fields")
+    }
+
+    @Test
+    fun `Uri Builder extracts autocomplete subclass query params`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val autocomplete = ubEndpoints.find { it.path.contains("autocomplete/json") }
+        assertThat(autocomplete).isNotNull()
+        assertThat(autocomplete!!.queryParams).containsAtLeast("key", "input", "sessiontoken", "components")
+    }
+
+    // ==================== Example Value Extraction ====================
+
+    @Test
+    fun `Uri Builder extracts appendQueryParameter example values`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val places = ubEndpoints.find { it.path.contains("nearbysearch") }
+        assertThat(places).isNotNull()
+        // radius has literal value "1000" in appendQueryParameter
+        assertThat(places!!.queryParamExamples["radius"]).contains("1000")
+    }
+
+    @Test
+    fun `Uri Builder subclass Map put extracts example values`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val details = ubEndpoints.find { it.path.contains("details/json") }
+        assertThat(details).isNotNull()
+        // PlaceDetailsBuilder: map.put("placeid", "ChIJ"), map.put("fields", "name,rating")
+        assertThat(details!!.queryParamExamples["placeid"]).contains("ChIJ")
+        assertThat(details.queryParamExamples["fields"]).contains("name,rating")
+    }
+
+    @Test
+    fun `Uri Builder autocomplete subclass extracts example values`() {
+        val ubEndpoints = analysis.apiEndpoints.filter { it.sourceType == "uri_builder" }
+        val autocomplete = ubEndpoints.find { it.path.contains("autocomplete/json") }
+        assertThat(autocomplete).isNotNull()
+        // PlaceAutocompleteBuilder: map.put("input", "coffee"), map.put("components", "country:us")
+        assertThat(autocomplete!!.queryParamExamples["input"]).contains("coffee")
+        assertThat(autocomplete.queryParamExamples["components"]).contains("country:us")
+    }
+
+    @Test
+    fun `Retrofit Headers annotation extracts example values`() {
+        val retrofitEndpoints = analysis.apiEndpoints.filter { it.sourceType == "retrofit" }
+        val profile = retrofitEndpoints.find { it.path.contains("profile") }
+        assertThat(profile).isNotNull()
+        // @Headers("Accept: application/json", "X-Version: 2")
+        assertThat(profile!!.headerParamExamples["Accept"]).contains("application/json")
+        assertThat(profile.headerParamExamples["X-Version"]).contains("2")
+    }
+
+    @Test
+    fun `OkHttp addHeader extracts example values`() {
+        val okhttpEndpoints = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val export = okhttpEndpoints.find { it.fullUrl.contains("export") }
+        assertThat(export).isNotNull()
+        // .addHeader("X-Api-Key", "somekey"), .addHeader("Accept", "application/json")
+        assertThat(export!!.headerParamExamples["X-Api-Key"]).contains("somekey")
+        assertThat(export.headerParamExamples["Accept"]).contains("application/json")
+    }
+
 }

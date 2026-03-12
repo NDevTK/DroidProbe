@@ -21,7 +21,9 @@ data class ApiEndpoint(
     val queryParams: List<String> = emptyList(),
     val pathParams: List<String> = emptyList(),
     val headerParams: List<String> = emptyList(),
-    val hasBody: Boolean = false
+    val hasBody: Boolean = false,
+    val queryParamExamples: Map<String, List<String>> = emptyMap(),
+    val headerParamExamples: Map<String, List<String>> = emptyMap()
 )
 
 @Serializable

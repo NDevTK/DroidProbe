@@ -1,5 +1,6 @@
 package com.droidprobe.app.ui.intents
 
+import com.droidprobe.app.ui.components.SuggestableTextField
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -717,77 +718,3 @@ private fun buildFullUri(dataUri: String, queryParams: List<QueryParamEntry>): S
     return builder.build().toString()
 }
 
-/**
- * Text field that shows a dropdown of suggested values when available,
- * while still allowing freeform text input.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SuggestableTextField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    label: String,
-    suggestedValues: List<String>,
-    keyboardType: KeyboardType = KeyboardType.Text,
-    placeholder: String? = null
-) {
-    val placeholderContent: @Composable (() -> Unit)? = placeholder?.let {
-        { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)) }
-    }
-
-    if (suggestedValues.isEmpty()) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = onValueChange,
-            label = { Text(label) },
-            placeholder = placeholderContent,
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardType)
-        )
-    } else {
-        var expanded by remember { mutableStateOf(false) }
-
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = it }
-        ) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = {
-                    onValueChange(it)
-                    expanded = true
-                },
-                label = { Text(label) },
-                placeholder = placeholderContent,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
-                singleLine = true,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                keyboardOptions = KeyboardOptions(keyboardType = keyboardType)
-            )
-
-            // Filter suggestions based on current text
-            val filtered = if (value.isBlank()) suggestedValues
-            else suggestedValues.filter { it.contains(value, ignoreCase = true) }
-
-            if (filtered.isNotEmpty()) {
-                ExposedDropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false }
-                ) {
-                    filtered.forEach { suggestion ->
-                        DropdownMenuItem(
-                            text = { Text(suggestion) },
-                            onClick = {
-                                onValueChange(suggestion)
-                                expanded = false
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}

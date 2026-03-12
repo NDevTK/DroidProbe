@@ -43,5 +43,6 @@ data class DiscoveryParameter(
 data class ExecutionResult(
     val statusCode: Int,
     val body: String,
-    val headers: Map<String, String>
+    val headers: Map<String, String>,
+    val discoveredScopes: List<String> = emptyList()
 )

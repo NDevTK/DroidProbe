@@ -9,6 +9,7 @@
 /Google.apk
 /apktool.jar
 /testapp/build
+/Apps
 .externalNativeBuild
 .cxx
 local.properties

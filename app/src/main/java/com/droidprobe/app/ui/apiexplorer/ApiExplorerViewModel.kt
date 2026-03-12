@@ -8,6 +8,7 @@ import com.droidprobe.app.data.model.DiscoveryMethod
 import com.droidprobe.app.data.model.ExecutionResult
 import com.droidprobe.app.data.model.KeyStatus
 import com.droidprobe.app.data.repository.AnalysisRepository
+import android.util.Log
 import com.droidprobe.app.interaction.ApiSpecFetcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +45,7 @@ val KEY_CATEGORIES = setOf(
 class ApiExplorerViewModel(
     private val packageName: String,
     private val rootUrl: String,
+    private val certSha1: String?,
     private val fetcher: ApiSpecFetcher,
     private val analysisRepository: AnalysisRepository
 ) : ViewModel() {
@@ -84,6 +86,7 @@ class ApiExplorerViewModel(
     private fun fetchDiscovery(apiKey: String? = null) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
+            Log.d(TAG, "fetchDiscovery: rootUrl=$rootUrl apiKey=${if (apiKey.isNullOrBlank()) "none" else "present"}")
 
             // Build virtual doc from DEX endpoints
             val dex = analysisRepository.getCachedDex(packageName)
@@ -93,34 +96,46 @@ class ApiExplorerViewModel(
             val matchingEndpoints = dex?.apiEndpoints?.filter {
                 it.baseUrl.contains(rootHost, ignoreCase = true)
             } ?: emptyList()
+            Log.d(TAG, "fetchDiscovery: ${matchingEndpoints.size} DEX endpoints for $rootHost")
+            for (ep in matchingEndpoints.take(10)) {
+                Log.d(TAG, "  DEX endpoint: ${ep.httpMethod} ${ep.path} (${ep.sourceType})")
+            }
             val virtualDoc = fetcher.synthesizeFromEndpoints(rootUrl, matchingEndpoints)
+            Log.d(TAG, "fetchDiscovery: virtualDoc=${if (virtualDoc != null) "${virtualDoc.resources.size} resources" else "null"}")
 
-            // Attempt remote fetch
-            val remoteResult = fetcher.fetchSpec(rootUrl, apiKey)
+            // Attempt remote fetch — use X-Goog-Api-Key header + Spatula for Google APIs
+            val remoteResult = fetcher.fetchSpec(rootUrl, apiKey, packageName, certSha1)
+            Log.d(TAG, "fetchDiscovery: remoteResult=${if (remoteResult.isSuccess) "success" else "failure: ${remoteResult.exceptionOrNull()?.message}"}")
 
             val finalDoc = remoteResult.fold(
                 onSuccess = { remoteDoc ->
+                    Log.d(TAG, "fetchDiscovery: remote doc '${remoteDoc.name}' with ${remoteDoc.resources.size} resources")
                     if (virtualDoc != null) fetcher.mergeDocuments(remoteDoc, virtualDoc)
                     else remoteDoc
                 },
                 onFailure = {
+                    Log.d(TAG, "fetchDiscovery: falling back to virtualDoc")
                     virtualDoc
                 }
             )
 
             if (finalDoc != null) {
+                Log.d(TAG, "fetchDiscovery: showing '${finalDoc.name}' with ${finalDoc.resources.size} resources, rootUrl=${finalDoc.rootUrl}")
                 _uiState.update { it.copy(discovery = finalDoc, isLoading = false) }
                 autoValidateAndExecute(finalDoc)
             } else {
+                val errMsg = remoteResult.exceptionOrNull()?.message
+                    ?: "No API specification found and no endpoints extracted"
+                Log.w(TAG, "fetchDiscovery: FAILED — $errMsg")
                 _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        error = remoteResult.exceptionOrNull()?.message
-                            ?: "No API specification found and no endpoints extracted"
-                    )
+                    it.copy(isLoading = false, error = errMsg)
                 }
             }
         }
+    }
+
+    companion object {
+        private const val TAG = "ApiExplorerVM"
     }
 
     private fun autoValidateAndExecute(doc: DiscoveryDocument) {
@@ -145,7 +160,9 @@ class ApiExplorerViewModel(
                             servicePath = doc.servicePath,
                             method = testMethod,
                             params = emptyMap(),
-                            apiKey = key
+                            apiKey = key,
+                            packageName = packageName,
+                            certSha1 = certSha1
                         ).getOrNull()
                     }
                     key to result
@@ -246,7 +263,9 @@ class ApiExplorerViewModel(
                 method = method,
                 params = state.paramValues,
                 apiKey = state.selectedApiKey,
-                requestBody = body
+                requestBody = body,
+                packageName = packageName,
+                certSha1 = certSha1
             ).fold(
                 onSuccess = { result ->
                     _uiState.update { it.copy(executionResult = result, isExecuting = false) }
@@ -266,12 +285,13 @@ class ApiExplorerViewModel(
     class Factory(
         private val packageName: String,
         private val rootUrl: String,
+        private val certSha1: String? = null,
         private val fetcher: ApiSpecFetcher,
         private val analysisRepository: AnalysisRepository
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return ApiExplorerViewModel(packageName, rootUrl, fetcher, analysisRepository) as T
+            return ApiExplorerViewModel(packageName, rootUrl, certSha1, fetcher, analysisRepository) as T
         }
     }
 }

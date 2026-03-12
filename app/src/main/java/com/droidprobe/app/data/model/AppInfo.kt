@@ -12,5 +12,6 @@ data class AppInfo(
     val icon: Drawable?,
     val targetSdk: Int,
     val minSdk: Int,
-    val uid: Int
+    val uid: Int,
+    val certSha1: String? = null
 )
