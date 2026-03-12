@@ -335,24 +335,56 @@ class DexAnalyzer {
             }
         }
 
+        // --- Post-process: Populate associatedColumns from QUERY operations ---
+        val crudResults = crudExtractor.getResults()
+        val callerQueries = callExtractor.getQueryResults()
+
+        val queryColumnsByClass = crudResults
+            .filter { it.operation == "QUERY" }
+            .groupBy { it.sourceClass }
+            .mapValues { (_, ops) -> ops.flatMap { it.projectionColumns }.distinct() }
+
+        // Also include INSERT contentValuesKeys as likely columns
+        val insertColumnsByClass = crudResults
+            .filter { it.operation == "INSERT" }
+            .groupBy { it.sourceClass }
+            .mapValues { (_, ops) -> ops.flatMap { it.contentValuesKeys }.distinct() }
+
+        val callerColumnsByAuthority = callerQueries
+            .filter { it.projection.isNotEmpty() && it.uri != null }
+            .groupBy { it.uri!!.removePrefix("content://").substringBefore('/') }
+            .mapValues { (_, queries) -> queries.flatMap { it.projection }.distinct() }
+
+        val enrichedUriResults = uriResults.map { info ->
+            if (info.associatedColumns.isNotEmpty()) return@map info
+
+            val providerCols = queryColumnsByClass[info.sourceClass] ?: emptyList()
+            val insertCols = insertColumnsByClass[info.sourceClass] ?: emptyList()
+            val callerCols = info.authority?.let { callerColumnsByAuthority[it] } ?: emptyList()
+            val merged = (providerCols + insertCols + callerCols).distinct()
+
+            if (merged.isNotEmpty()) info.copy(associatedColumns = merged) else info
+        }
+
         // --- Security analysis: cross-reference DEX patterns with manifest ---
         val fileProviderResults = fileProviderExtractor.getResults()
         val partialDex = DexAnalysis(
             packageName = manifestAnalysis.packageName,
-            contentProviderUris = uriResults,
+            contentProviderUris = enrichedUriResults,
             intentExtras = extrasWithActions,
             fileProviderPaths = fileProviderResults,
             rawContentUriStrings = stringCollector.getContentUriStrings(),
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
             contentProviderCalls = callExtractor.getResults(),
-            crudOperations = crudExtractor.getResults(),
+            crudOperations = crudResults,
             orderedBroadcasts = orderedBroadcastExtractor.getResults(),
             allUrlStrings = stringCollector.getAllUrlStrings(),
             sensitiveStrings = sensitiveStrings,
             apiEndpoints = apiEndpoints,
             discoveredCategories = intentExtractor.getDiscoveredCategories(),
             discoveredDataUris = intentExtractor.getDiscoveredDataUris(),
-            discoveredDataMimeTypes = intentExtractor.getDiscoveredDataMimeTypes()
+            discoveredDataMimeTypes = intentExtractor.getDiscoveredDataMimeTypes(),
+            contentResolverQueries = callerQueries
         )
 
         val securityWarnings = SecurityAnalyzer().analyze(

@@ -7,6 +7,7 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.StringReference
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.droidprobe.app.analysis.dex.DexAnalyzer
+import com.droidprobe.app.analysis.dex.MethodCFG
 import com.droidprobe.app.data.model.*
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
@@ -129,6 +130,7 @@ class DexDiagnosticTest {
         sb.appendLine("\n=== CRUD OPERATIONS (${analysis.crudOperations.size}) ===")
         for (op in analysis.crudOperations) {
             sb.appendLine("  [${op.operation}] keys=${op.contentValuesKeys} mimeTypes=${op.mimeTypes}")
+            sb.appendLine("    projection=${op.projectionColumns} selections=${op.selectionTemplates} sorts=${op.sortOrders} modes=${op.openFileModes}")
             sb.appendLine("    src=${op.sourceClass} method=${op.sourceMethod}")
         }
 
@@ -169,7 +171,8 @@ class DexDiagnosticTest {
             "PrefixValueActivity" to "onCreate",
             "StringSwitchActivity" to "onCreate",
             "OrderedReceiver" to "onReceive",
-            "CrudProvider" to "getType"
+            "CrudProvider" to "getType",
+            "QueryMetadataProvider" to "query"
         )
 
         for (dexName in dexFile.dexEntryNames) {
@@ -182,6 +185,8 @@ class DexDiagnosticTest {
                     if (method.name != matchTarget.value) continue
                     sb.appendLine("  method: ${method.name} regs=${impl.registerCount}")
                     val instructions = impl.instructions.toList()
+                    val cfg = MethodCFG(instructions, impl.tryBlocks)
+                    val cfgStrings = cfg.computeStringRegisters()
                     for ((i, instr) in instructions.withIndex()) {
                         val detail = buildString {
                             append("    [$i] ${instr.opcode}")
@@ -196,6 +201,10 @@ class DexDiagnosticTest {
                                 }
                             }
                             if (instr is OffsetInstruction) append(" +${instr.codeOffset}")
+                            val state = cfgStrings[i]
+                            if (state != null && state.isNotEmpty()) {
+                                append("  CFG={${state.entries.joinToString { "v${it.key}=${it.value}" }}}")
+                            }
                         }
                         sb.appendLine(detail)
                     }

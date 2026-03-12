@@ -235,7 +235,8 @@ class DexAnalysisIntegrationTest {
                         writePermission = null,
                         grantUriPermissions = true,
                         pathPermissions = emptyList()
-                    )
+                    ),
+                    provider("QueryMetadataProvider", "$PKG.querymeta", true)
                 ),
                 customPermissions = emptyList()
             )
@@ -2940,6 +2941,111 @@ class DexAnalysisIntegrationTest {
         // .addHeader("X-Api-Key", "somekey"), .addHeader("Accept", "application/json")
         assertThat(export!!.headerParamExamples["X-Api-Key"]).contains("somekey")
         assertThat(export.headerParamExamples["Accept"]).contains("application/json")
+    }
+
+    // ==================== Query Metadata Extraction ====================
+
+    @Test
+    fun `QueryMetadataProvider ACCOUNTS projection columns detected`() {
+        val queryOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        assertThat(queryOps).isNotEmpty()
+        val allColumns = queryOps.flatMap { it.projectionColumns }.toSet()
+        assertThat(allColumns).contains("_id")
+        assertThat(allColumns).contains("display_name")
+        assertThat(allColumns).contains("email")
+        assertThat(allColumns).contains("account_type")
+    }
+
+    @Test
+    fun `QueryMetadataProvider MESSAGES projection columns detected`() {
+        val queryOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        assertThat(queryOps).isNotEmpty()
+        val allColumns = queryOps.flatMap { it.projectionColumns }.toSet()
+        assertThat(allColumns).contains("subject")
+        assertThat(allColumns).contains("sender")
+        assertThat(allColumns).contains("timestamp")
+    }
+
+    @Test
+    fun `QueryMetadataProvider selection template detected`() {
+        val queryOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        val selections = queryOps.flatMap { it.selectionTemplates }.toSet()
+        assertThat(selections).contains("account_type=?")
+    }
+
+    @Test
+    fun `QueryMetadataProvider sort orders detected`() {
+        val queryOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        val sorts = queryOps.flatMap { it.sortOrders }.toSet()
+        assertThat(sorts).contains("display_name ASC")
+        assertThat(sorts).contains("timestamp DESC")
+    }
+
+    @Test
+    fun `QueryMetadataProvider openFile modes detected`() {
+        val openFileOps = analysis.crudOperations.filter {
+            it.operation == "OPEN_FILE" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        assertThat(openFileOps).isNotEmpty()
+        val modes = openFileOps.flatMap { it.openFileModes }.toSet()
+        assertThat(modes).contains("r")
+        assertThat(modes).contains("rw")
+    }
+
+    @Test
+    fun `CrudProvider query columns detected from MatrixCursor`() {
+        val queryOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("CrudProvider")
+        }
+        assertThat(queryOps).isNotEmpty()
+        val cols = queryOps.flatMap { it.projectionColumns }.toSet()
+        assertThat(cols).containsAtLeast("_id", "title", "body")
+    }
+
+    @Test
+    fun `Caller-side contentResolver query projection detected`() {
+        val queries = analysis.contentResolverQueries.filter {
+            it.sourceClass.contains("QueryCaller")
+        }
+        assertThat(queries).isNotEmpty()
+        val proj = queries.flatMap { it.projection }.toSet()
+        assertThat(proj).containsAtLeast("_id", "display_name", "email")
+    }
+
+    @Test
+    fun `Caller-side contentResolver query selection detected`() {
+        val queries = analysis.contentResolverQueries.filter {
+            it.sourceClass.contains("QueryCaller")
+        }
+        assertThat(queries.any { it.selection == "account_type=? AND active=?" }).isTrue()
+    }
+
+    @Test
+    fun `QueryMetadataProvider columns NOT attributed to CrudProvider`() {
+        val crudQuery = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("CrudProvider")
+        }
+        val crudCols = crudQuery.flatMap { it.projectionColumns }.toSet()
+        assertThat(crudCols).doesNotContain("display_name")
+        assertThat(crudCols).doesNotContain("account_type")
+    }
+
+    @Test
+    fun `CrudProvider columns NOT attributed to QueryMetadataProvider`() {
+        val queryMetaOps = analysis.crudOperations.filter {
+            it.operation == "QUERY" && it.sourceClass.contains("QueryMetadataProvider")
+        }
+        val metaCols = queryMetaOps.flatMap { it.projectionColumns }.toSet()
+        assertThat(metaCols).doesNotContain("title")
+        assertThat(metaCols).doesNotContain("body")
     }
 
 }

@@ -43,5 +43,6 @@ data class DexAnalysis(
     val discoveredCategories: Set<String> = emptySet(),
     val discoveredDataUris: Set<String> = emptySet(),
     val discoveredDataMimeTypes: Map<String, String> = emptyMap(),
+    val contentResolverQueries: List<ContentResolverQueryInfo> = emptyList(),
     val securityWarnings: List<SecurityWarning> = emptyList()
 )

@@ -222,6 +222,8 @@ fun ContentProviderScreen(
                         "UPDATE" -> MaterialTheme.colorScheme.tertiary
                         "DELETE" -> MaterialTheme.colorScheme.error
                         "GET_TYPE" -> MaterialTheme.colorScheme.secondary
+                        "QUERY" -> MaterialTheme.colorScheme.primary
+                        "OPEN_FILE" -> MaterialTheme.colorScheme.tertiary
                         else -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                     Card(
@@ -266,6 +268,38 @@ fun ContentProviderScreen(
                             if (crud.mimeTypes.isNotEmpty()) {
                                 Text(
                                     text = "MIME: ${crud.mimeTypes.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (crud.projectionColumns.isNotEmpty()) {
+                                Text(
+                                    text = "Columns: ${crud.projectionColumns.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (crud.selectionTemplates.isNotEmpty()) {
+                                Text(
+                                    text = "Selection: ${crud.selectionTemplates.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (crud.sortOrders.isNotEmpty()) {
+                                Text(
+                                    text = "Sort: ${crud.sortOrders.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (crud.openFileModes.isNotEmpty()) {
+                                Text(
+                                    text = "Modes: ${crud.openFileModes.joinToString(", ")}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(top = 2.dp)
@@ -478,6 +512,60 @@ private fun QueryableUriCard(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+
+                    // Columns chip row
+                    if (queryable.columns.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            queryable.columns.forEach { col ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text(
+                                        text = col,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Selection suggestions
+                    if (queryable.suggestedSelections.isNotEmpty()) {
+                        queryable.suggestedSelections.forEach { sel ->
+                            Text(
+                                text = "WHERE $sel",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    // Sort order suggestions
+                    if (queryable.suggestedSortOrders.isNotEmpty()) {
+                        queryable.suggestedSortOrders.forEach { sort ->
+                            Text(
+                                text = "ORDER BY $sort",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
 

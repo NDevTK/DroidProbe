@@ -240,6 +240,11 @@
             android:readPermission="com.droidprobe.testapp.permission.READ_ARTICLES"
             android:writePermission="com.droidprobe.testapp.permission.WRITE_ARTICLES" />
 
+        <provider
+            android:name=".providers.QueryMetadataProvider"
+            android:authorities="com.droidprobe.testapp.querymeta"
+            android:exported="true" />
+
         <!-- === FileProvider === -->
 
         <provider

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.droidprobe.app.data.model.ContentProviderCallInfo
+import com.droidprobe.app.data.model.ContentResolverQueryInfo
 import com.droidprobe.app.data.model.CrudOperationInfo
 import com.droidprobe.app.data.model.ProviderComponent
 import com.droidprobe.app.data.repository.AnalysisRepository
@@ -21,6 +22,8 @@ data class QueryableUri(
     val sourceClass: String?,
     val matchCode: Int?,
     val columns: List<String>,
+    val suggestedSelections: List<String> = emptyList(),
+    val suggestedSortOrders: List<String> = emptyList(),
     val result: ContentProviderInteractor.QueryResult? = null,
     val isQuerying: Boolean = false
 )
@@ -56,17 +59,42 @@ class ContentProviderViewModel(
 
                 val uris = mutableListOf<QueryableUri>()
 
+                // Build lookup maps for CRUD query metadata by source class (smali format)
+                val crudQueryOps = dex?.crudOperations?.filter { it.operation == "QUERY" } ?: emptyList()
+                val selectionsByClass = crudQueryOps.groupBy { it.sourceClass }
+                    .mapValues { (_, ops) -> ops.flatMap { it.selectionTemplates }.distinct() }
+                val sortsByClass = crudQueryOps.groupBy { it.sourceClass }
+                    .mapValues { (_, ops) -> ops.flatMap { it.sortOrders }.distinct() }
+
+                // Caller-side query suggestions by authority
+                val callerQueries = dex?.contentResolverQueries ?: emptyList()
+                val callerSelByAuth = callerQueries.filter { it.uri != null && it.selection != null }
+                    .groupBy { it.uri!!.removePrefix("content://").substringBefore('/') }
+                    .mapValues { (_, qs) -> qs.mapNotNull { it.selection }.distinct() }
+                val callerSortByAuth = callerQueries.filter { it.uri != null && it.sortOrder != null }
+                    .groupBy { it.uri!!.removePrefix("content://").substringBefore('/') }
+                    .mapValues { (_, qs) -> qs.mapNotNull { it.sortOrder }.distinct() }
+
                 dex?.contentProviderUris
                     ?.filter { it.uriPattern.startsWith("content://") }
                     ?.forEach { info ->
+                        val smaliClass = info.sourceClass
+                        val authority = info.authority
+                        val selections = (selectionsByClass[smaliClass] ?: emptyList()) +
+                            (authority?.let { callerSelByAuth[it] } ?: emptyList())
+                        val sorts = (sortsByClass[smaliClass] ?: emptyList()) +
+                            (authority?.let { callerSortByAuth[it] } ?: emptyList())
+
                         uris.add(
                             QueryableUri(
                                 uri = info.uriPattern,
                                 source = "DEX",
-                                sourceClass = info.sourceClass
+                                sourceClass = smaliClass
                                     .removePrefix("L").removeSuffix(";").replace('/', '.'),
                                 matchCode = info.matchCode,
-                                columns = info.associatedColumns
+                                columns = info.associatedColumns,
+                                suggestedSelections = selections.distinct(),
+                                suggestedSortOrders = sorts.distinct()
                             )
                         )
                     }
@@ -128,10 +156,10 @@ class ContentProviderViewModel(
                 val result = interactor.query(
                     ContentProviderInteractor.QueryParams(
                         uri = Uri.parse(queryableUri.uri),
-                        projection = null,
+                        projection = queryableUri.columns.ifEmpty { null }?.toTypedArray(),
                         selection = null,
                         selectionArgs = null,
-                        sortOrder = null
+                        sortOrder = queryableUri.suggestedSortOrders.firstOrNull()
                     )
                 )
                 _uiState.update { state ->
