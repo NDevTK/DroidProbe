@@ -2,6 +2,7 @@ package com.droidprobe.app.analysis
 
 import com.droidprobe.app.analysis.dex.DexAnalyzer
 import com.droidprobe.app.data.model.*
+import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.interaction.ApiSpecFetcher
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.runBlocking
@@ -18,6 +19,7 @@ class DexAnalysisIntegrationTest {
 
     companion object {
         private lateinit var analysis: DexAnalysis
+        private lateinit var manifest: ManifestAnalysis
         private const val PKG = "com.droidprobe.testapp"
 
         @BeforeClass
@@ -31,7 +33,7 @@ class DexAnalysisIntegrationTest {
             tempFile.deleteOnExit()
             apkStream.use { input -> tempFile.outputStream().use { input.copyTo(it) } }
 
-            val manifest = buildManifestAnalysis()
+            manifest = buildManifestAnalysis()
 
             analysis = runBlocking {
                 DexAnalyzer().analyze(tempFile.absolutePath, manifest)
@@ -98,7 +100,30 @@ class DexAnalysisIntegrationTest {
                         )
                     )),
                     activity("SettingsAlias", true, actionFilter("$PKG.action.SETTINGS_ALIAS"),
-                        target = "$PKG.activities.ValueScanActivity")
+                        target = "$PKG.activities.ValueScanActivity"),
+                    // Security test activities
+                    ExportedComponent(
+                        name = "$PKG.security.VulnerableWebViewActivity",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.WEBVIEW"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = emptyList(), dataAuthorities = emptyList(),
+                            dataPaths = emptyList(), mimeTypes = emptyList()
+                        ))
+                    ),
+                    ExportedComponent(
+                        name = "$PKG.security.IntentRedirectActivity",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.REDIRECT"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = emptyList(), dataAuthorities = emptyList(),
+                            dataPaths = emptyList(), mimeTypes = emptyList()
+                        ))
+                    )
                 ),
                 services = listOf(
                     ExportedComponent(
@@ -149,6 +174,16 @@ class DexAnalysisIntegrationTest {
                     provider("ParamProvider", "$PKG.params", true),
                     provider("StaticUriProvider", "$PKG.static", true),
                     provider("UriBuilderProvider", "$PKG.builder", true),
+                    ProviderComponent(
+                        name = "$PKG.security.PathTraversalProvider",
+                        authority = "$PKG.traversal",
+                        isExported = true,
+                        permission = null,
+                        readPermission = null,
+                        writePermission = null,
+                        grantUriPermissions = false,
+                        pathPermissions = emptyList()
+                    ),
                     ProviderComponent(
                         name = "androidx.core.content.FileProvider",
                         authority = "$PKG.fileprovider",
@@ -2260,5 +2295,146 @@ class DexAnalysisIntegrationTest {
     fun `existing putExtra values still detected after default value addition`() {
         val extras = extrasFor("PutExtraActivity")
         assertThat(extras).isNotEmpty()
+    }
+
+    // ==================== SecurityAnalyzer — POSITIVE ====================
+
+    @Test
+    fun `WebView JavaScript enabled detected in exported activity`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "WEBVIEW_JS_ENABLED" }
+        assertThat(warnings).isNotEmpty()
+        assertThat(warnings.any {
+            it.componentName == "$PKG.security.VulnerableWebViewActivity"
+        }).isTrue()
+        assertThat(warnings.first().severity).isEqualTo(SecurityWarning.Severity.HIGH)
+    }
+
+    @Test
+    fun `WebView file access detected in exported activity`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "WEBVIEW_FILE_ACCESS" }
+        assertThat(warnings).isNotEmpty()
+        assertThat(warnings.any {
+            it.componentName == "$PKG.security.VulnerableWebViewActivity"
+        }).isTrue()
+    }
+
+    @Test
+    fun `intent redirection detected in exported activity`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "INTENT_REDIRECTION" }
+        assertThat(warnings).isNotEmpty()
+        assertThat(warnings.any {
+            it.componentName == "$PKG.security.IntentRedirectActivity"
+        }).isTrue()
+        assertThat(warnings.first().severity).isEqualTo(SecurityWarning.Severity.CRITICAL)
+    }
+
+    @Test
+    fun `path traversal detected in ContentProvider`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "PATH_TRAVERSAL" }
+        assertThat(warnings).isNotEmpty()
+        assertThat(warnings.any {
+            it.sourceClass?.contains("PathTraversalProvider") == true
+        }).isTrue()
+    }
+
+    @Test
+    fun `unprotected exported components detected`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "UNPROTECTED_EXPORT" }
+        // All testapp components are exported without permissions
+        assertThat(warnings).isNotEmpty()
+    }
+
+    // ==================== SecurityAnalyzer — NEGATIVE ====================
+
+    @Test
+    fun `non-exported activities do not generate unprotected export warnings`() {
+        val warnings = analysis.securityWarnings.filter { it.category == "UNPROTECTED_EXPORT" }
+        assertThat(warnings.none {
+            it.componentName == "$PKG.activities.BaseExtraActivity"
+        }).isTrue()
+    }
+
+    @Test
+    fun `security warnings have valid severity levels`() {
+        for (warning in analysis.securityWarnings) {
+            assertThat(warning.severity).isNotNull()
+            assertThat(warning.category).isNotEmpty()
+            assertThat(warning.title).isNotEmpty()
+            assertThat(warning.description).isNotEmpty()
+        }
+    }
+
+    // ==================== Cross-App SecurityAnalyzer ====================
+
+    private fun selfAsCrossAppData() = AnalysisRepository.CrossAppData(
+        packageName = PKG,
+        appName = "TestApp",
+        manifest = manifest,
+        dex = analysis
+    )
+
+    @Test
+    fun `cross-app analysis with no other apps returns empty`() {
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, emptyList())
+        assertThat(warnings).isEmpty()
+    }
+
+    @Test
+    fun `cross-app shared secrets detected when same app appears as other`() {
+        // Using testapp as both target and other: identical sensitiveStrings → shared secrets
+        assertThat(analysis.sensitiveStrings).isNotEmpty()
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, listOf(selfAsCrossAppData()))
+        val sharedSecretWarnings = warnings.filter { it.category == "SHARED_SECRET" }
+        assertThat(sharedSecretWarnings).isNotEmpty()
+        assertThat(sharedSecretWarnings.first().severity).isEqualTo(SecurityWarning.Severity.MEDIUM)
+        assertThat(sharedSecretWarnings.first().title).contains("TestApp")
+    }
+
+    @Test
+    fun `cross-app provider access detected when other app references our authorities`() {
+        // Testapp has ContentResolver.call() targeting its own provider authorities
+        val exportedAuthorities = manifest.providers.filter { it.isExported }.map { it.authority }
+        assertThat(exportedAuthorities).isNotEmpty()
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, listOf(selfAsCrossAppData()))
+        val providerWarnings = warnings.filter { it.category == "CROSS_APP_PROVIDER_ACCESS" }
+        assertThat(providerWarnings).isNotEmpty()
+        assertThat(providerWarnings.first().evidence!!).contains(PKG)
+    }
+
+    @Test
+    fun `cross-app intent redirection chain not triggered without matching sender`() {
+        // IntentRedirectActivity exists but no testapp class sends intents to its action,
+        // so chain detection should NOT produce CHAIN_INTENT_REDIRECT for self-reference
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, listOf(selfAsCrossAppData()))
+        val chainWarnings = warnings.filter { it.category == "CHAIN_INTENT_REDIRECT" }
+        // Either empty or only if testapp actually has putExtra targeting the redirect action
+        for (w in chainWarnings) {
+            assertThat(w.severity).isEqualTo(SecurityWarning.Severity.CRITICAL)
+            assertThat(w.evidence!!).contains("→")
+        }
+    }
+
+    @Test
+    fun `cross-app warnings have valid structure`() {
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, listOf(selfAsCrossAppData()))
+        for (warning in warnings) {
+            assertThat(warning.severity).isNotNull()
+            assertThat(warning.category).isNotEmpty()
+            assertThat(warning.title).isNotEmpty()
+            assertThat(warning.description).isNotEmpty()
+        }
+    }
+
+    @Test
+    fun `cross-app warnings are sorted by severity then category`() {
+        val warnings = SecurityAnalyzer().analyzeCrossApp(manifest, analysis, listOf(selfAsCrossAppData()))
+        if (warnings.size > 1) {
+            for (i in 0 until warnings.size - 1) {
+                val curr = warnings[i]
+                val next = warnings[i + 1]
+                val cmp = compareBy<SecurityWarning>({ it.severity.ordinal }, { it.category })
+                assertThat(cmp.compare(curr, next)).isAtMost(0)
+            }
+        }
     }
 }

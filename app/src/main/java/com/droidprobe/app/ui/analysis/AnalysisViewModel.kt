@@ -4,6 +4,7 @@ import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.droidprobe.app.analysis.SecurityAnalyzer
 import com.droidprobe.app.data.model.DexAnalysis
 import com.droidprobe.app.data.model.ManifestAnalysis
 import com.droidprobe.app.data.repository.AnalysisRepository
@@ -96,6 +97,9 @@ class AnalysisViewModel(
                     dexProgress = ""
                 )
             }
+
+            // Load cross-app warnings in background
+            loadCrossAppWarnings(manifest, dexAnalysis)
         } catch (e: Exception) {
             _uiState.update {
                 it.copy(
@@ -104,6 +108,27 @@ class AnalysisViewModel(
                     error = "DEX analysis failed: ${e.message}"
                 )
             }
+        }
+    }
+
+    private suspend fun loadCrossAppWarnings(manifest: ManifestAnalysis, dex: DexAnalysis) {
+        try {
+            val crossAppData = analysisRepository.getAllCrossAppData(packageName)
+            if (crossAppData.isEmpty()) return
+
+            val crossWarnings = SecurityAnalyzer().analyzeCrossApp(manifest, dex, crossAppData)
+            if (crossWarnings.isEmpty()) return
+
+            _uiState.update { state ->
+                val currentDex = state.dexAnalysis ?: return@update state
+                state.copy(
+                    dexAnalysis = currentDex.copy(
+                        securityWarnings = currentDex.securityWarnings + crossWarnings
+                    )
+                )
+            }
+        } catch (_: Exception) {
+            // Cross-app analysis is best-effort; don't fail the main analysis
         }
     }
 

@@ -27,7 +27,15 @@ data class LaunchableTarget(
     val discoveredExtras: List<IntentInfo>,
     val discoveredDataUris: List<String> = emptyList(),
     val discoveredMimeTypes: Map<String, String> = emptyMap(), // uri -> mimeType from setDataAndType
-    val discoveredCategories: List<String> = emptyList() // categories found in bytecode beyond manifest
+    val discoveredCategories: List<String> = emptyList(), // categories found in bytecode beyond manifest
+    val crossAppExtras: Map<String, CrossAppExtra> = emptyMap() // key -> learned values from other apps
+)
+
+data class CrossAppExtra(
+    val key: String,
+    val type: String?,
+    val values: List<String>,
+    val senderApps: List<String> // app names that send this extra
 )
 
 data class ExtraEntry(
@@ -35,7 +43,8 @@ data class ExtraEntry(
     val value: String = "",
     val type: String = "String",
     val suggestedValues: List<String> = emptyList(),
-    val associatedAction: String? = null
+    val associatedAction: String? = null,
+    val crossAppSenders: List<String> = emptyList()
 )
 
 data class QueryParamEntry(
@@ -281,22 +290,108 @@ class IntentBuilderViewModel(
                 addTargets(manifest.receivers, "Receiver")
 
                 _uiState.update { it.copy(targets = targets) }
+
+                // Background: load cross-app intent examples
+                loadCrossAppExtras(targets)
             } catch (_: Exception) { }
         }
     }
 
+    private suspend fun loadCrossAppExtras(targets: List<LaunchableTarget>) {
+        try {
+            val crossAppData = analysisRepository.getAllCrossAppData(packageName)
+            if (crossAppData.isEmpty()) return
+
+            // Build lookup: action → target index, component → target index
+            val actionToTargets = mutableMapOf<String, MutableList<Int>>()
+            val componentToTargets = mutableMapOf<String, MutableList<Int>>()
+            for ((i, target) in targets.withIndex()) {
+                for (action in target.actions) {
+                    actionToTargets.getOrPut(action) { mutableListOf() }.add(i)
+                }
+                componentToTargets.getOrPut(target.component.name) { mutableListOf() }.add(i)
+            }
+
+            // For each other app's putExtra calls, match to our targets
+            val crossExtrasPerTarget = Array(targets.size) {
+                mutableMapOf<String, MutableList<Pair<String, IntentInfo>>>() // key -> [(appName, info)]
+            }
+
+            for (other in crossAppData) {
+                for (extra in other.dex.intentExtras) {
+                    if (extra.possibleValues.isEmpty() && extra.defaultValue == null) continue
+
+                    // Match by explicit component name
+                    val compTargets = extra.associatedComponent?.let { componentToTargets[it] }
+                    // Match by action
+                    val actionTargets = extra.associatedAction?.let { actionToTargets[it] }
+
+                    val matchedTargets = buildSet {
+                        compTargets?.let { addAll(it) }
+                        actionTargets?.let { addAll(it) }
+                    }
+
+                    for (idx in matchedTargets) {
+                        crossExtrasPerTarget[idx]
+                            .getOrPut(extra.extraKey) { mutableListOf() }
+                            .add(other.appName to extra)
+                    }
+                }
+            }
+
+            // Merge into targets
+            val updatedTargets = targets.mapIndexed { i, target ->
+                val crossMap = crossExtrasPerTarget[i]
+                if (crossMap.isEmpty()) return@mapIndexed target
+
+                val crossAppExtras = crossMap.map { (key, entries) ->
+                    val allValues = entries.flatMap { (_, info) ->
+                        info.possibleValues + listOfNotNull(info.defaultValue)
+                    }.distinct()
+                    val senders = entries.map { it.first }.distinct()
+                    val type = entries.firstOrNull()?.second?.extraType
+                    key to CrossAppExtra(key, type, allValues, senders)
+                }.toMap()
+
+                target.copy(crossAppExtras = crossAppExtras)
+            }
+
+            _uiState.update { it.copy(targets = updatedTargets) }
+        } catch (_: Exception) { }
+    }
+
     fun expandTarget(target: LaunchableTarget) {
         val extras = target.discoveredExtras.map { info ->
+            val crossApp = target.crossAppExtras[info.extraKey]
+            val allSuggested = if (crossApp != null) {
+                (info.possibleValues + crossApp.values).distinct()
+            } else info.possibleValues
             ExtraEntry(
                 key = info.extraKey,
                 value = "",
                 type = info.extraType ?: "String",
-                suggestedValues = info.possibleValues,
-                associatedAction = info.associatedAction
+                suggestedValues = allSuggested,
+                associatedAction = info.associatedAction,
+                crossAppSenders = crossApp?.senderApps ?: emptyList()
             )
         }
+        // Add extras only found via cross-app (not already discovered in target's own code)
+        val ownKeys = target.discoveredExtras.map { it.extraKey }.toSet()
+        val crossOnlyExtras = target.crossAppExtras.values
+            .filter { it.key !in ownKeys }
+            .map { crossApp ->
+                ExtraEntry(
+                    key = crossApp.key,
+                    value = "",
+                    type = crossApp.type ?: "String",
+                    suggestedValues = crossApp.values,
+                    associatedAction = null,
+                    crossAppSenders = crossApp.senderApps
+                )
+            }
+        val allExtras = extras + crossOnlyExtras
         _uiState.update {
-            it.copy(expandedTarget = target, extras = extras, queryParams = emptyList(), dataUri = "", result = null, error = null)
+            it.copy(expandedTarget = target, extras = allExtras, queryParams = emptyList(), dataUri = "", result = null, error = null)
         }
     }
 

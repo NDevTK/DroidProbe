@@ -6,6 +6,7 @@ import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+import com.droidprobe.app.analysis.SecurityAnalyzer
 import com.droidprobe.app.data.model.ContentProviderInfo
 import com.droidprobe.app.data.model.DexAnalysis
 import com.droidprobe.app.data.model.ManifestAnalysis
@@ -66,6 +67,7 @@ class DexAnalyzer {
         val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses, classIndex)
         val callExtractor = ContentProviderCallExtractor()
         val urlExtractor = UrlExtractor(classIndex)
+        val securityDetector = SecurityPatternDetector(classHierarchy)
 
         // --- Pass 1.5: Pre-scan for URI parameter wrapper methods ---
         // Detects methods that internally call getQueryParameter/getBooleanQueryParameter
@@ -107,6 +109,7 @@ class DexAnalyzer {
                 fileProviderExtractor.process(classDef)
                 callExtractor.process(classDef)
                 urlExtractor.process(classDef)
+                securityDetector.process(classDef)
             }
         }
 
@@ -328,11 +331,13 @@ class DexAnalyzer {
             }
         }
 
-        DexAnalysis(
+        // --- Security analysis: cross-reference DEX patterns with manifest ---
+        val fileProviderResults = fileProviderExtractor.getResults()
+        val partialDex = DexAnalysis(
             packageName = manifestAnalysis.packageName,
             contentProviderUris = uriResults,
             intentExtras = extrasWithActions,
-            fileProviderPaths = fileProviderExtractor.getResults(),
+            fileProviderPaths = fileProviderResults,
             rawContentUriStrings = stringCollector.getContentUriStrings(),
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
             contentProviderCalls = callExtractor.getResults(),
@@ -343,6 +348,13 @@ class DexAnalyzer {
             discoveredDataUris = intentExtractor.getDiscoveredDataUris(),
             discoveredDataMimeTypes = intentExtractor.getDiscoveredDataMimeTypes()
         )
+
+        val securityWarnings = SecurityAnalyzer().analyze(
+            manifestAnalysis, partialDex, securityDetector.getResults()
+        )
+        DexDebugLog.log("[DexAnalyzer] Security analysis: ${securityWarnings.size} warnings")
+
+        partialDex.copy(securityWarnings = securityWarnings)
     }
 
     private fun loadDexFiles(apkPath: String): List<DexBackedDexFile> {

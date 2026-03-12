@@ -38,5 +38,6 @@ data class DexAnalysis(
     val apiEndpoints: List<ApiEndpoint> = emptyList(),
     val discoveredCategories: Set<String> = emptySet(),
     val discoveredDataUris: Set<String> = emptySet(),
-    val discoveredDataMimeTypes: Map<String, String> = emptyMap()
+    val discoveredDataMimeTypes: Map<String, String> = emptyMap(),
+    val securityWarnings: List<SecurityWarning> = emptyList()
 )

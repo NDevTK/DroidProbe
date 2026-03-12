@@ -152,4 +152,34 @@ class AnalysisRepository(
             dao.getAnalysisResult(packageName)
         }
     }
+
+    /**
+     * Cross-app data for a single other app. Holds only the fields needed for
+     * intent learning and chain detection, avoiding full deserialization costs.
+     */
+    data class CrossAppData(
+        val packageName: String,
+        val appName: String,
+        val manifest: ManifestAnalysis,
+        val dex: DexAnalysis
+    )
+
+    /**
+     * Load all analyzed apps except [excludePackage] from the DB.
+     * Returns deserialized manifest+dex pairs for cross-app queries.
+     */
+    suspend fun getAllCrossAppData(excludePackage: String): List<CrossAppData> {
+        return withContext(Dispatchers.IO) {
+            val entities = dao.getAllAnalyzedExcept(ANALYSIS_VERSION, excludePackage)
+            entities.mapNotNull { entity ->
+                try {
+                    val manifest = json.decodeFromString<ManifestAnalysis>(gzipDecompress(entity.manifestJson))
+                    val dex = json.decodeFromString<DexAnalysis>(gzipDecompress(entity.dexJson!!))
+                    CrossAppData(entity.packageName, entity.appName, manifest, dex)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
 }

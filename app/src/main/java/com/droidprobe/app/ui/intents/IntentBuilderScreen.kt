@@ -339,6 +339,10 @@ private fun TargetCard(
             if (target.discoveredDataUris.isNotEmpty()) {
                 summaryParts.add("${target.discoveredDataUris.size} data URIs")
             }
+            if (target.crossAppExtras.isNotEmpty()) {
+                val senderCount = target.crossAppExtras.values.flatMap { it.senderApps }.distinct().size
+                summaryParts.add("$senderCount app${if (senderCount != 1) "s" else ""} send intents")
+            }
             if (summaryParts.isNotEmpty()) {
                 Text(
                     text = summaryParts.joinToString(" + "),
@@ -536,6 +540,21 @@ private fun TargetCard(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f)
                                     )
+                                    if (entry.crossAppSenders.isNotEmpty()) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Text(
+                                                text = entry.crossAppSenders.joinToString(", "),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.tertiary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
                                     if (entry.associatedAction != null) {
                                         Surface(
                                             color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),

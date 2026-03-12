@@ -23,6 +23,9 @@ interface AnalysisResultDao {
     @Query("SELECT * FROM analysis_results ORDER BY analyzedAt DESC")
     fun getAllAnalysisResults(): Flow<List<AnalysisResultEntity>>
 
+    @Query("SELECT * FROM analysis_results WHERE analysisVersion = :version AND dexJson IS NOT NULL AND packageName != :excludePackage")
+    suspend fun getAllAnalyzedExcept(version: Int, excludePackage: String): List<AnalysisResultEntity>
+
     @Query("DELETE FROM analysis_results WHERE packageName = :packageName")
     suspend fun deleteAnalysisResult(packageName: String)
 

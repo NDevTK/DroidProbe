@@ -1,5 +1,6 @@
 package com.droidprobe.app.ui.scanner
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,16 +10,24 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
@@ -30,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.droidprobe.app.DroidProbeApplication
@@ -40,9 +50,10 @@ import com.droidprobe.app.ui.components.AppCard
 fun AppListScreen(
     onAppClick: (String) -> Unit,
     viewModel: AppListViewModel = viewModel(
-        factory = AppListViewModel.Factory(
-            (LocalContext.current.applicationContext as DroidProbeApplication).appModule.appRepository
-        )
+        factory = run {
+            val appModule = (LocalContext.current.applicationContext as DroidProbeApplication).appModule
+            AppListViewModel.Factory(appModule.appRepository, appModule.analysisRepository)
+        }
     )
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -55,6 +66,17 @@ fun AppListScreen(
                         text = "DroidProbe",
                         style = MaterialTheme.typography.headlineMedium
                     )
+                },
+                actions = {
+                    if (uiState.bulkScanProgress == null && uiState.allApps.isNotEmpty()) {
+                        IconButton(onClick = viewModel::startBulkScan) {
+                            Icon(
+                                Icons.Default.Shield,
+                                contentDescription = "Scan All Apps",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
@@ -69,6 +91,58 @@ fun AppListScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            // Bulk scan progress banner
+            val bulkProgress = uiState.bulkScanProgress
+            AnimatedVisibility(visible = bulkProgress != null) {
+                if (bulkProgress != null) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = MaterialTheme.shapes.medium
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Scanning ${bulkProgress.scanned}/${bulkProgress.total}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                    Text(
+                                        text = bulkProgress.currentApp,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (bulkProgress.failed > 0) {
+                                    Text(
+                                        text = "${bulkProgress.failed} failed",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    )
+                                }
+                                TextButton(onClick = viewModel::cancelBulkScan) {
+                                    Text("Cancel")
+                                }
+                            }
+                            LinearProgressIndicator(
+                                progress = { bulkProgress.scanned.toFloat() / bulkProgress.total.coerceAtLeast(1) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.1f)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Search bar
             TextField(
                 value = uiState.searchQuery,

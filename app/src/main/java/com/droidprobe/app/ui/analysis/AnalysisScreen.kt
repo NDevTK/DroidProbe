@@ -214,6 +214,72 @@ fun AnalysisScreen(
                     }
 
                     uiState.dexAnalysis?.let { dex ->
+                        // Security Warnings — split per-app vs cross-app
+                        if (dex.securityWarnings.isNotEmpty()) {
+                            val crossAppCategories = setOf(
+                                "CHAIN_INTENT_REDIRECT", "CROSS_APP_PROVIDER_ACCESS",
+                                "SHARED_SECRET", "PERMISSION_ESCALATION"
+                            )
+                            val perAppWarnings = dex.securityWarnings.filter { it.category !in crossAppCategories }
+                            val crossAppWarnings = dex.securityWarnings.filter { it.category in crossAppCategories }
+
+                            // Per-app warnings
+                            if (perAppWarnings.isNotEmpty()) {
+                                val criticalCount = perAppWarnings.count {
+                                    it.severity == com.droidprobe.app.data.model.SecurityWarning.Severity.CRITICAL
+                                }
+                                val highCount = perAppWarnings.count {
+                                    it.severity == com.droidprobe.app.data.model.SecurityWarning.Severity.HIGH
+                                }
+                                val label = buildString {
+                                    append("Security Warnings")
+                                    val parts = mutableListOf<String>()
+                                    if (criticalCount > 0) parts.add("$criticalCount critical")
+                                    if (highCount > 0) parts.add("$highCount high")
+                                    if (parts.isNotEmpty()) append(" (${parts.joinToString()})")
+                                }
+                                SectionHeader(
+                                    title = label,
+                                    count = perAppWarnings.size,
+                                    initiallyExpanded = criticalCount > 0 || highCount > 0
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                                        perAppWarnings.forEach { warning ->
+                                            SecurityWarningRow(warning)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Cross-app warnings
+                            if (crossAppWarnings.isNotEmpty()) {
+                                val criticalCount = crossAppWarnings.count {
+                                    it.severity == com.droidprobe.app.data.model.SecurityWarning.Severity.CRITICAL
+                                }
+                                val highCount = crossAppWarnings.count {
+                                    it.severity == com.droidprobe.app.data.model.SecurityWarning.Severity.HIGH
+                                }
+                                val label = buildString {
+                                    append("Cross-App Analysis")
+                                    val parts = mutableListOf<String>()
+                                    if (criticalCount > 0) parts.add("$criticalCount critical")
+                                    if (highCount > 0) parts.add("$highCount high")
+                                    if (parts.isNotEmpty()) append(" (${parts.joinToString()})")
+                                }
+                                SectionHeader(
+                                    title = label,
+                                    count = crossAppWarnings.size,
+                                    initiallyExpanded = criticalCount > 0 || highCount > 0
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                                        crossAppWarnings.forEach { warning ->
+                                            SecurityWarningRow(warning)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Unified API Surfaces: endpoints grouped with associated keys
                         if (dex.apiEndpoints.isNotEmpty() || dex.sensitiveStrings.isNotEmpty()) {
                             val keySecrets = dex.sensitiveStrings.filter { it.category in KEY_CATEGORIES }
@@ -772,6 +838,74 @@ private fun UrlRow(url: String) {
                     modifier = Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SecurityWarningRow(warning: com.droidprobe.app.data.model.SecurityWarning) {
+    val severityColor = when (warning.severity) {
+        com.droidprobe.app.data.model.SecurityWarning.Severity.CRITICAL -> MaterialTheme.colorScheme.error
+        com.droidprobe.app.data.model.SecurityWarning.Severity.HIGH -> MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+        com.droidprobe.app.data.model.SecurityWarning.Severity.MEDIUM ->
+            MaterialTheme.colorScheme.tertiary
+        com.droidprobe.app.data.model.SecurityWarning.Severity.INFO ->
+            MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val severityLabel = warning.severity.name
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        color = severityColor.copy(alpha = 0.08f),
+        shape = MaterialTheme.shapes.small
+    ) {
+        Row(modifier = Modifier.padding(8.dp)) {
+            // Severity badge
+            Surface(
+                color = severityColor.copy(alpha = 0.2f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = severityLabel,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = severityColor
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = warning.title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = warning.description,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                if (warning.componentName != null) {
+                    Text(
+                        text = warning.componentName.substringAfterLast('.'),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = severityColor,
+                        modifier = Modifier.padding(top = 1.dp)
+                    )
+                }
+                if (warning.evidence != null) {
+                    Text(
+                        text = warning.evidence,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(top = 1.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
