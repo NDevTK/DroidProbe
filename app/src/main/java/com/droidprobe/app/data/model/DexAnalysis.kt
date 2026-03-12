@@ -35,5 +35,8 @@ data class DexAnalysis(
     val contentProviderCalls: List<ContentProviderCallInfo> = emptyList(),
     val allUrlStrings: List<String> = emptyList(),
     val sensitiveStrings: List<SensitiveString> = emptyList(),
-    val apiEndpoints: List<ApiEndpoint> = emptyList()
+    val apiEndpoints: List<ApiEndpoint> = emptyList(),
+    val discoveredCategories: Set<String> = emptySet(),
+    val discoveredDataUris: Set<String> = emptySet(),
+    val discoveredDataMimeTypes: Map<String, String> = emptyMap()
 )

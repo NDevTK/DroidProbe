@@ -34,6 +34,9 @@ class IntentExtraExtractor(
     // Maps dedup key -> index in results list, for merging values
     private val resultIndex = mutableMapOf<String, Int>()
     private val discoveredActions = mutableSetOf<String>()
+    private val discoveredCategories = mutableSetOf<String>()
+    private val discoveredDataUris = mutableSetOf<String>()
+    private val discoveredDataMimeTypes = mutableMapOf<String, String>() // uri -> mimeType
 
     private val componentResolutionCache = mutableMapOf<String, String?>()
 
@@ -94,6 +97,10 @@ class IntentExtraExtractor(
     }
 
     fun getResults(): List<IntentInfo> = results.toList()
+    fun getDiscoveredActions(): Set<String> = discoveredActions.toSet()
+    fun getDiscoveredCategories(): Set<String> = discoveredCategories.toSet()
+    fun getDiscoveredDataUris(): Set<String> = discoveredDataUris.toSet()
+    fun getDiscoveredDataMimeTypes(): Map<String, String> = discoveredDataMimeTypes.toMap()
 
     fun resolveComponent(smaliType: String): String? {
         componentResolutionCache[smaliType]?.let { return it }
@@ -181,7 +188,11 @@ class IntentExtraExtractor(
                 isIntentPutExtra(ref) -> handlePutExtra(ref, instructions, i, classDef, method, cfgStrings)
                 isBundleGet(ref) -> handleBundleGet(ref, instructions, i, classDef, method, cfgStrings, cfg.successors)
                 isBundlePut(ref) -> handleBundlePut(ref, instructions, i, classDef, method, cfgStrings)
+                isBundleContainsKey(ref) -> handleBundleContainsKey(instructions, i, classDef, method, cfgStrings)
                 isSetAction(ref) -> handleSetAction(instructions, i, cfgStrings)
+                isAddCategory(ref) -> handleAddCategory(instructions, i, cfgStrings)
+                isSetData(ref) -> handleSetData(instructions, i, cfgStrings)
+                isSetDataAndType(ref) -> handleSetDataAndType(instructions, i, cfgStrings)
             }
         }
     }
@@ -217,6 +228,35 @@ class IntentExtraExtractor(
                 ref.name == "setAction"
     }
 
+    private fun isBundleContainsKey(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/os/Bundle;" &&
+                ref.name == "containsKey" &&
+                ref.parameterTypes.size == 1 &&
+                ref.parameterTypes[0] == "Ljava/lang/String;"
+    }
+
+    private fun isAddCategory(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/content/Intent;" &&
+                ref.name == "addCategory" &&
+                ref.parameterTypes.size == 1 &&
+                ref.parameterTypes[0] == "Ljava/lang/String;"
+    }
+
+    private fun isSetData(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/content/Intent;" &&
+                ref.name == "setData" &&
+                ref.parameterTypes.size == 1 &&
+                ref.parameterTypes[0] == "Landroid/net/Uri;"
+    }
+
+    private fun isSetDataAndType(ref: MethodReference): Boolean {
+        return ref.definingClass == "Landroid/content/Intent;" &&
+                ref.name == "setDataAndType" &&
+                ref.parameterTypes.size == 2 &&
+                ref.parameterTypes[0] == "Landroid/net/Uri;" &&
+                ref.parameterTypes[1] == "Ljava/lang/String;"
+    }
+
     // --- Handlers ---
 
     private fun handleGetExtra(
@@ -233,12 +273,15 @@ class IntentExtraExtractor(
         val keyReg = instr.registerD
         val key = cfgStrings[callIndex]?.get(keyReg) ?: return
 
+        // Extract default value for typed extras (2nd parameter in registerE)
+        val defaultValue = extractDefaultValue(ref.name, instructions, callIndex, instr)
+
         // Scan forward for value comparisons on the result register
         val values = mutableListOf<String>()
         val resultReg = ForwardValueScanner.getMoveResultRegister(instructions, callIndex)
 
         DexDebugLog.logFiltered(classDef.type, key,
-            "[IntentExtra] ${ref.name}(\"$key\") type=$type at index=$callIndex " +
+            "[IntentExtra] ${ref.name}(\"$key\") type=$type default=$defaultValue at index=$callIndex " +
             "resultReg=${resultReg?.let { "v$it" } ?: "none"} " +
             "class=${classDef.type} method=${method.name}")
 
@@ -263,7 +306,35 @@ class IntentExtraExtractor(
             }
         }
 
-        addResult(key, type, classDef, method, values)
+        addResult(key, type, classDef, method, values, defaultValue)
+    }
+
+    private fun extractDefaultValue(
+        methodName: String,
+        instructions: List<Instruction>,
+        callIndex: Int,
+        instr: Instruction35c
+    ): String? {
+        // Typed extras with a primitive default parameter in registerE:
+        // getIntExtra(String, int), getBooleanExtra(String, boolean),
+        // getShortExtra(String, short), getByteExtra(String, byte),
+        // getCharExtra(String, char), getFloatExtra(String, float)
+        // getLongExtra and getDoubleExtra use wide registers (registerE+registerF)
+        return when (methodName) {
+            "getIntExtra", "getShortExtra", "getByteExtra", "getCharExtra" -> {
+                ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            }
+            "getBooleanExtra" -> {
+                ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.let {
+                    if (it == 0) "false" else "true"
+                }
+            }
+            "getLongExtra" -> {
+                // Long default uses wide register pair (registerE, registerF)
+                ForwardValueScanner.resolveIntFromRegister(instructions, callIndex, instr.registerE)?.toString()
+            }
+            else -> null // String extras don't have a default parameter
+        }
     }
 
     private fun handlePutExtra(
@@ -367,6 +438,84 @@ class IntentExtraExtractor(
         }
     }
 
+    private fun handleBundleContainsKey(
+        instructions: List<Instruction>,
+        callIndex: Int,
+        classDef: DexBackedClassDef,
+        method: DexBackedMethod,
+        cfgStrings: Array<Map<Int, String>?>
+    ) {
+        val instr = instructions[callIndex] as? Instruction35c ?: return
+        val key = cfgStrings[callIndex]?.get(instr.registerD) ?: return
+        addResult(key, "Unknown", classDef, method)
+    }
+
+    private fun handleAddCategory(instructions: List<Instruction>, callIndex: Int, cfgStrings: Array<Map<Int, String>?>) {
+        val instr = instructions[callIndex] as? Instruction35c ?: return
+        val category = cfgStrings[callIndex]?.get(instr.registerD)
+        if (category != null) {
+            discoveredCategories.add(category)
+        }
+    }
+
+    private fun handleSetData(instructions: List<Instruction>, callIndex: Int, cfgStrings: Array<Map<Int, String>?>) {
+        val instr = instructions[callIndex] as? Instruction35c ?: return
+        val uriReg = instr.registerD
+        val uriString = resolveUriParseString(instructions, callIndex, uriReg, cfgStrings)
+        if (uriString != null) {
+            discoveredDataUris.add(uriString)
+        }
+    }
+
+    private fun handleSetDataAndType(instructions: List<Instruction>, callIndex: Int, cfgStrings: Array<Map<Int, String>?>) {
+        val instr = instructions[callIndex] as? Instruction35c ?: return
+        val uriReg = instr.registerD
+        val mimeTypeReg = instr.registerE
+        val uriString = resolveUriParseString(instructions, callIndex, uriReg, cfgStrings)
+        val mimeType = cfgStrings[callIndex]?.get(mimeTypeReg)
+        if (uriString != null) {
+            discoveredDataUris.add(uriString)
+            if (mimeType != null) {
+                discoveredDataMimeTypes[uriString] = mimeType
+            }
+        }
+    }
+
+    /**
+     * Backward-track a Uri register to find Uri.parse(string) and resolve the string argument.
+     * Looks for: invoke-static {vX}, Landroid/net/Uri;->parse(Ljava/lang/String;)Landroid/net/Uri;
+     * followed by move-result-object into [uriReg].
+     */
+    private fun resolveUriParseString(
+        instructions: List<Instruction>,
+        fromIndex: Int,
+        uriReg: Int,
+        cfgStrings: Array<Map<Int, String>?>
+    ): String? {
+        // Backward scan: find move-result-object that set uriReg, preceded by Uri.parse()
+        for (j in fromIndex - 1 downTo maxOf(0, fromIndex - 30)) {
+            val prev = instructions[j]
+            if (prev.opcode == com.android.tools.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT &&
+                prev is com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction &&
+                prev.registerA == uriReg && j > 0
+            ) {
+                val call = instructions[j - 1]
+                if (call is ReferenceInstruction && call is Instruction35c) {
+                    val ref = call.reference
+                    if (ref is MethodReference &&
+                        ref.definingClass == "Landroid/net/Uri;" &&
+                        ref.name == "parse" &&
+                        ref.parameterTypes.size == 1
+                    ) {
+                        // The string argument is in registerC (static call, first arg)
+                        return cfgStrings[j - 1]?.get(call.registerC)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     // --- Helpers ---
 
     private fun inferTypeFromBundleMethodName(methodName: String, prefix: String): String {
@@ -391,19 +540,21 @@ class IntentExtraExtractor(
         type: String,
         classDef: DexBackedClassDef,
         method: DexBackedMethod,
-        values: List<String> = emptyList()
+        values: List<String> = emptyList(),
+        defaultValue: String? = null
     ) {
         val uniqueKey = "${classDef.type}:$key:$type"
 
         // If we've already seen this extra, merge any new values into it
         val existingIdx = resultIndex[uniqueKey]
         if (existingIdx != null) {
-            if (values.isNotEmpty()) {
-                val existing = results[existingIdx]
-                val merged = (existing.possibleValues + values).distinct()
-                results[existingIdx] = existing.copy(possibleValues = merged)
+            val existing = results[existingIdx]
+            val merged = if (values.isNotEmpty()) (existing.possibleValues + values).distinct() else existing.possibleValues
+            val mergedDefault = existing.defaultValue ?: defaultValue
+            if (merged != existing.possibleValues || mergedDefault != existing.defaultValue) {
+                results[existingIdx] = existing.copy(possibleValues = merged, defaultValue = mergedDefault)
                 DexDebugLog.logFiltered(classDef.type, key,
-                    "[IntentExtra] MERGE extra \"$key\" ($type): +$values → merged=${merged}")
+                    "[IntentExtra] MERGE extra \"$key\" ($type): +$values default=$mergedDefault → merged=${merged}")
             }
             return
         }
@@ -413,7 +564,7 @@ class IntentExtraExtractor(
             ?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.')
 
         DexDebugLog.logFiltered(classDef.type, key,
-            "[IntentExtra] ADD extra \"$key\" ($type) values=$values " +
+            "[IntentExtra] ADD extra \"$key\" ($type) values=$values default=$defaultValue " +
             "component=$componentJava source=${classDef.type}::${method.name}")
 
         resultIndex[uniqueKey] = results.size
@@ -422,6 +573,7 @@ class IntentExtraExtractor(
                 extraKey = key,
                 extraType = type,
                 possibleValues = values.distinct(),
+                defaultValue = defaultValue,
                 associatedAction = null,
                 associatedComponent = componentJava,
                 sourceClass = classDef.type,

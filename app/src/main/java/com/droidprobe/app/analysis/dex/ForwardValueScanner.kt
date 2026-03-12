@@ -821,7 +821,8 @@ object ForwardValueScanner {
     private val URI_COMPONENT_METHODS = setOf("getHost", "getScheme", "getPath")
 
     private val CONST_INT_OPCODES = listOf(
-        Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16
+        Opcode.CONST_4, Opcode.CONST_16, Opcode.CONST, Opcode.CONST_HIGH16,
+        Opcode.CONST_WIDE_16, Opcode.CONST_WIDE_32
     )
 
     /** Compute total parameter register slots for a method reference (including 'this' for virtual). */

@@ -27,6 +27,8 @@ import com.droidprobe.app.data.model.ManifestAnalysis
  * 4. Static fields named CONTENT_URI or *_URI
  * 5. Raw "content://" string constants as fallback
  * 6. getQueryParameterNames() + Map.get("key") — bulk param reader pattern
+ * 7. Deep link URI from manual scheme/host/path validation
+ * 8. Uri.Builder().scheme().authority().appendPath().build() chains
  *
  * Uses forward register tracking so that string/int constants loaded once and reused
  * across many calls (e.g. an authority loaded once for 50+ addURI calls) are resolved
@@ -797,6 +799,9 @@ class UriPatternExtractor(
             }
         }
 
+        // Strategy 8: Uri.Builder chain detection
+        detectUriBuilderChains(instructions, cfgStrings, classDef, method)
+
         // Construct deep link URIs from detected scheme/host/path validation.
         // Use gated CFG BFS to pair components: at each deep link comparison's
         // conditional branch, only follow the "matched" successor. This prevents
@@ -905,6 +910,126 @@ class UriPatternExtractor(
             }
         }
         return false
+    }
+
+    // --- Strategy 8: Uri.Builder chain detection ---
+
+    private data class UriBuilderState(
+        var scheme: String? = null,
+        var authority: String? = null,
+        val pathSegments: MutableList<String> = mutableListOf(),
+        val queryParams: MutableList<Pair<String, String>> = mutableListOf()
+    )
+
+    /**
+     * Detect Uri.Builder chains: new-instance Uri$Builder → scheme() → authority() →
+     * appendPath() → build(). Track the builder register through move-result-object
+     * aliasing (builder methods return `this`). On build(), reconstruct the URI.
+     */
+    private fun detectUriBuilderChains(
+        instructions: List<Instruction>,
+        cfgStrings: Array<Map<Int, String>?>,
+        classDef: DexBackedClassDef,
+        method: DexBackedMethod
+    ) {
+        // Track which registers hold a Uri.Builder instance → builder state
+        val builderRegs = mutableMapOf<Int, UriBuilderState>()
+
+        for ((i, instr) in instructions.withIndex()) {
+            // Detect: new-instance vX, Landroid/net/Uri$Builder;
+            if (instr.opcode == Opcode.NEW_INSTANCE && instr is ReferenceInstruction && instr is OneRegisterInstruction) {
+                val ref = instr.reference
+                if (ref.toString() == "Landroid/net/Uri\$Builder;") {
+                    builderRegs[instr.registerA] = UriBuilderState()
+                    continue
+                }
+            }
+
+            // Track move-result-object: builder methods return the builder itself
+            if (instr.opcode == Opcode.MOVE_RESULT_OBJECT && instr is OneRegisterInstruction) {
+                // Check if previous instruction was a builder method call
+                if (i > 0) {
+                    val prev = instructions[i - 1]
+                    if (prev is ReferenceInstruction) {
+                        val prevRef = prev.reference
+                        if (prevRef is MethodReference && prevRef.definingClass == "Landroid/net/Uri\$Builder;") {
+                            // Find which builder state this was called on
+                            val calledOn = if (prev is Instruction35c) prev.registerC else null
+                            if (calledOn != null && calledOn in builderRegs) {
+                                val state = builderRegs[calledOn]!!
+                                val destReg = instr.registerA
+                                if (destReg != calledOn) {
+                                    builderRegs[destReg] = state
+                                }
+                            }
+                        }
+                    }
+                }
+                continue
+            }
+
+            // Handle builder method calls
+            if (instr !is ReferenceInstruction) continue
+            val ref = instr.reference
+            if (ref !is MethodReference) continue
+            if (ref.definingClass != "Landroid/net/Uri\$Builder;") continue
+
+            val i35c = instr as? Instruction35c ?: continue
+            val receiverReg = i35c.registerC
+            val state = builderRegs[receiverReg] ?: continue
+            val regStrings = cfgStrings[i] ?: emptyMap()
+
+            when (ref.name) {
+                "scheme" -> {
+                    val value = regStrings[i35c.registerD]
+                    if (value != null) state.scheme = value
+                }
+                "authority" -> {
+                    val value = regStrings[i35c.registerD]
+                    if (value != null) state.authority = value
+                }
+                "appendPath" -> {
+                    val value = regStrings[i35c.registerD]
+                    if (value != null) state.pathSegments.add(value)
+                }
+                "path" -> {
+                    val value = regStrings[i35c.registerD]
+                    if (value != null) {
+                        state.pathSegments.clear()
+                        state.pathSegments.add(value.removePrefix("/"))
+                    }
+                }
+                "appendQueryParameter" -> {
+                    val key = regStrings[i35c.registerD]
+                    val value = regStrings[i35c.registerE]
+                    if (key != null && value != null) {
+                        state.queryParams.add(key to value)
+                    } else if (key != null) {
+                        state.queryParams.add(key to "")
+                    }
+                }
+                "build" -> {
+                    // Reconstruct URI from accumulated state
+                    val scheme = state.scheme ?: continue
+                    val authority = state.authority ?: continue
+                    val path = if (state.pathSegments.isNotEmpty()) {
+                        "/" + state.pathSegments.joinToString("/")
+                    } else ""
+                    val queryString = if (state.queryParams.isNotEmpty()) {
+                        "?" + state.queryParams.joinToString("&") { (k, v) ->
+                            if (v.isNotEmpty()) "$k=$v" else k
+                        }
+                    } else ""
+                    val uri = "$scheme://$authority$path$queryString"
+                    DexDebugLog.log("[UriBuilder] Detected builder URI: $uri in ${classDef.type}::${method.name}")
+                    if (state.queryParams.isNotEmpty()) {
+                        addResultWithInlineParams(uri, classDef, method.name)
+                    } else {
+                        addResult(uri, null, classDef, method.name)
+                    }
+                }
+            }
+        }
     }
 
     /**

@@ -85,6 +85,42 @@
         </activity>
 
         <activity
+            android:name=".activities.ParseBooleanActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.PARSE_BOOL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.ContainsKeyActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.CONTAINS_KEY" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.SetDataActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.SET_DATA" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.DefaultValueActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.DEFAULTS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".activities.DeepLinkActivity"
             android:exported="true">
             <intent-filter>
@@ -155,6 +191,11 @@
         <provider
             android:name=".providers.StaticUriProvider"
             android:authorities="com.droidprobe.testapp.static"
+            android:exported="true" />
+
+        <provider
+            android:name=".providers.UriBuilderProvider"
+            android:authorities="com.droidprobe.testapp.builder"
             android:exported="true" />
 
         <!-- === FileProvider === -->

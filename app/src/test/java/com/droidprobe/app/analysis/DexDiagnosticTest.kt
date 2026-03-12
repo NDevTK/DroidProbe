@@ -41,6 +41,10 @@ class DexDiagnosticTest {
                 activity("InterProcActivity", true, actionFilter("$pkg.action.INTERPROC")),
                 activity("StringSwitchActivity", true, actionFilter("$pkg.action.SWITCH")),
                 activity("PrefixValueActivity", true, actionFilter("$pkg.action.PREFIX")),
+                activity("ParseBooleanActivity", true, actionFilter("$pkg.action.PARSE_BOOL")),
+                activity("ContainsKeyActivity", true, actionFilter("$pkg.action.CONTAINS_KEY")),
+                activity("SetDataActivity", true, actionFilter("$pkg.action.SET_DATA")),
+                activity("DefaultValueActivity", true, actionFilter("$pkg.action.DEFAULTS")),
                 activity("DeepLinkActivity", true, listOf(IntentFilterInfo(
                     listOf("android.intent.action.VIEW"),
                     listOf("android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"),
@@ -59,6 +63,7 @@ class DexDiagnosticTest {
                 provider("DispatchProvider", "$pkg.dispatch", true),
                 provider("ParamProvider", "$pkg.params", true),
                 provider("StaticUriProvider", "$pkg.static", true),
+                provider("UriBuilderProvider", "$pkg.builder", true),
                 ProviderComponent("androidx.core.content.FileProvider", "$pkg.fileprovider", false, null, null, null, true, emptyList())
             ),
             customPermissions = emptyList()
@@ -107,9 +112,18 @@ class DexDiagnosticTest {
 
         sb.appendLine("\n=== INTENT EXTRAS (${analysis.intentExtras.size}) ===")
         for (e in analysis.intentExtras) {
-            sb.appendLine("  key=${e.extraKey} type=${e.extraType} values=${e.possibleValues}")
+            sb.appendLine("  key=${e.extraKey} type=${e.extraType} values=${e.possibleValues} default=${e.defaultValue}")
             sb.appendLine("    component=${e.associatedComponent} action=${e.associatedAction} src=${e.sourceClass}")
         }
+
+        sb.appendLine("\n=== DISCOVERED DATA URIS (${analysis.discoveredDataUris.size}) ===")
+        for (u in analysis.discoveredDataUris) sb.appendLine("  $u")
+
+        sb.appendLine("\n=== DISCOVERED DATA MIME TYPES (${analysis.discoveredDataMimeTypes.size}) ===")
+        for ((uri, mime) in analysis.discoveredDataMimeTypes) sb.appendLine("  $uri → $mime")
+
+        sb.appendLine("\n=== DISCOVERED CATEGORIES (${analysis.discoveredCategories.size}) ===")
+        for (c in analysis.discoveredCategories) sb.appendLine("  $c")
 
         File("build/analysis-dump.txt").writeText(sb.toString())
         assert(true) // Always pass, just dump data

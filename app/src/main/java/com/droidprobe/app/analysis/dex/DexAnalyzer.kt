@@ -338,7 +338,10 @@ class DexAnalyzer {
             contentProviderCalls = callExtractor.getResults(),
             allUrlStrings = stringCollector.getAllUrlStrings(),
             sensitiveStrings = sensitiveStrings,
-            apiEndpoints = apiEndpoints
+            apiEndpoints = apiEndpoints,
+            discoveredCategories = intentExtractor.getDiscoveredCategories(),
+            discoveredDataUris = intentExtractor.getDiscoveredDataUris(),
+            discoveredDataMimeTypes = intentExtractor.getDiscoveredDataMimeTypes()
         )
     }
 

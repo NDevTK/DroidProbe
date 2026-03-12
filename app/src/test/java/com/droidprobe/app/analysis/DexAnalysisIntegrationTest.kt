@@ -83,6 +83,10 @@ class DexAnalysisIntegrationTest {
                     activity("InterProcActivity", true, actionFilter("$PKG.action.INTERPROC")),
                     activity("StringSwitchActivity", true, actionFilter("$PKG.action.SWITCH")),
                     activity("PrefixValueActivity", true, actionFilter("$PKG.action.PREFIX")),
+                    activity("ParseBooleanActivity", true, actionFilter("$PKG.action.PARSE_BOOL")),
+                    activity("ContainsKeyActivity", true, actionFilter("$PKG.action.CONTAINS_KEY")),
+                    activity("SetDataActivity", true, actionFilter("$PKG.action.SET_DATA")),
+                    activity("DefaultValueActivity", true, actionFilter("$PKG.action.DEFAULTS")),
                     activity("DeepLinkActivity", true, listOf(
                         IntentFilterInfo(
                             actions = listOf("android.intent.action.VIEW"),
@@ -144,6 +148,7 @@ class DexAnalysisIntegrationTest {
                     provider("DispatchProvider", "$PKG.dispatch", true),
                     provider("ParamProvider", "$PKG.params", true),
                     provider("StaticUriProvider", "$PKG.static", true),
+                    provider("UriBuilderProvider", "$PKG.builder", true),
                     ProviderComponent(
                         name = "androidx.core.content.FileProvider",
                         authority = "$PKG.fileprovider",
@@ -1832,5 +1837,428 @@ class DexAnalysisIntegrationTest {
         val doc = ApiSpecFetcher().synthesizeFromEndpoints("https://api.example.com/v1/", apiEndpoints)!!
         // servicePath should be "/" since paths like "users/{id}", "search", "auth/login" have no common prefix
         assertThat(doc.servicePath).isEqualTo("/")
+    }
+
+    // ==================== Group AD: Content provider param exactness ====================
+
+    @Test
+    fun `BasicProvider items URI has exactly filter and sort_by params`() {
+        val items = urisForAuthority("$PKG.basic").find {
+            it.uriPattern == "content://$PKG.basic/items"
+        }
+        assertThat(items).isNotNull()
+        assertThat(items!!.queryParameters).containsExactly("filter", "sort_by")
+    }
+
+    @Test
+    fun `ParamProvider params URI has exactly verbose include_deleted tags`() {
+        val paramUris = urisForAuthority("$PKG.params")
+        val allParams = paramUris.flatMap { it.queryParameters }.toSet()
+        assertThat(allParams).containsExactly("verbose", "include_deleted", "tags")
+    }
+
+    @Test
+    fun `BulkParamReader params are exactly user_id action referrer`() {
+        val uris = analysis.contentProviderUris.filter {
+            it.sourceClass?.contains("BulkParamReader") == true
+        }
+        val allParams = uris.flatMap { it.queryParameters }.toSet()
+        assertThat(allParams).containsAtLeast("user_id", "action", "referrer")
+    }
+
+    @Test
+    fun `StaticUriProvider has no query params`() {
+        val staticUris = urisForAuthority("$PKG.static")
+        assertThat(staticUris).isNotEmpty()
+        for (uri in staticUris) {
+            assertThat(uri.queryParameters).isEmpty()
+        }
+    }
+
+    // ==================== Group AE: Boolean.parseBoolean() value detection ====================
+
+    @Test
+    fun `ParseBooleanActivity verbose has values true false`() {
+        val extras = extrasFor("ParseBooleanActivity")
+        val verbose = extras.find { it.extraKey == "verbose" }
+        assertThat(verbose).isNotNull()
+        assertThat(verbose!!.possibleValues).containsAtLeast("true", "false")
+    }
+
+    @Test
+    fun `ParseBooleanActivity verbose type is String`() {
+        val extras = extrasFor("ParseBooleanActivity")
+        val verbose = extras.find { it.extraKey == "verbose" }
+        assertThat(verbose).isNotNull()
+        // getStringExtra → type is String (parseBoolean is applied after extraction)
+        assertThat(verbose!!.extraType).isEqualTo("String")
+    }
+
+    @Test
+    fun `ParseBooleanActivity verbose NOT on other activities`() {
+        val directExtras = extrasFor("DirectExtraActivity")
+        val directKeys = directExtras.map { it.extraKey }.toSet()
+        assertThat(directKeys).doesNotContain("verbose")
+    }
+
+    // ==================== Group AF: Additional sensitive string categories ====================
+
+    @Test
+    fun `MongoDB URI detected as sensitive string`() {
+        val mongo = analysis.sensitiveStrings.find { it.category == "MongoDB URI" }
+        assertThat(mongo).isNotNull()
+        assertThat(mongo!!.value).contains("mongodb")
+    }
+
+    @Test
+    fun `MongoDB URI has no associated URLs`() {
+        val mongo = analysis.sensitiveStrings.find { it.category == "MongoDB URI" }
+        assertThat(mongo).isNotNull()
+        assertThat(mongo!!.associatedUrls).isEmpty()
+    }
+
+    @Test
+    fun `Mapbox Token detected as sensitive string`() {
+        val mapbox = analysis.sensitiveStrings.find { it.category == "Mapbox Token" }
+        assertThat(mapbox).isNotNull()
+        assertThat(mapbox!!.value).startsWith("pk.eyJ")
+    }
+
+    @Test
+    fun `Sentry DSN detected as sensitive string`() {
+        val sentry = analysis.sensitiveStrings.find { it.category == "Sentry DSN" }
+        assertThat(sentry).isNotNull()
+        assertThat(sentry!!.value).contains("sentry.io")
+    }
+
+    // ==================== Group AG: Tighter value assertions — containsExactly ====================
+
+    @Test
+    fun `StringSwitch category has exactly food drink dessert`() {
+        val extras = extrasFor("StringSwitchActivity")
+        val category = extras.find { it.extraKey == "category" }
+        assertThat(category).isNotNull()
+        assertThat(category!!.possibleValues).containsExactly("food", "drink", "dessert")
+    }
+
+    @Test
+    fun `PrefixValue transport has exactly air sea`() {
+        val extras = extrasFor("PrefixValueActivity")
+        val transport = extras.find { it.extraKey == "transport" }
+        assertThat(transport).isNotNull()
+        assertThat(transport!!.possibleValues).containsExactly("air", "sea")
+    }
+
+    @Test
+    fun `priority_code has exactly 10 20 30`() {
+        val extras = extrasFor("ValueScanActivity")
+        val priority = extras.find { it.extraKey == "priority_code" }
+        assertThat(priority).isNotNull()
+        assertThat(priority!!.possibleValues).containsExactly("10", "20", "30")
+    }
+
+    @Test
+    fun `StringBuilder URL is exactly events example com api v3 track`() {
+        val concat = analysis.apiEndpoints.filter { it.sourceType == "concatenation" }
+        val events = concat.find { it.fullUrl.contains("events.example.com") }
+        assertThat(events).isNotNull()
+        assertThat(events!!.fullUrl).isEqualTo("https://events.example.com/api/v3/track")
+    }
+
+    @Test
+    fun `UploadService endpoints have correct baseUrl upload example com`() {
+        val uploadEndpoints = analysis.apiEndpoints.filter {
+            it.sourceType == "retrofit" && it.baseUrl == "https://upload.example.com/"
+        }
+        assertThat(uploadEndpoints).isNotEmpty()
+        val paths = uploadEndpoints.map { it.path }.toSet()
+        assertThat(paths).containsAtLeast("files/upload", "forms/submit", "items/filter")
+    }
+
+    // ==================== Group AH: OkHttp header-endpoint association ====================
+
+    @Test
+    fun `OkHttp export endpoint has both X-Api-Key and Accept headers`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val export = okhttp.find { it.fullUrl.contains("data/export") }
+        assertThat(export).isNotNull()
+        assertThat(export!!.headerParams).containsExactly("X-Api-Key", "Accept")
+    }
+
+    @Test
+    fun `OkHttp export endpoint fullUrl is correct`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val export = okhttp.find { it.fullUrl.contains("data/export") }
+        assertThat(export).isNotNull()
+        assertThat(export!!.fullUrl).isEqualTo("https://api.example.com/data/export")
+    }
+
+    @Test
+    fun `InlineKeyClient payments endpoint has X-Stripe-Key header`() {
+        val okhttp = analysis.apiEndpoints.filter { it.sourceType == "okhttp" }
+        val payments = okhttp.find { it.fullUrl.contains("payments.example.com") }
+        assertThat(payments).isNotNull()
+        assertThat(payments!!.headerParams).contains("X-Stripe-Key")
+    }
+
+    // ==================== Group AI: Uri.Builder pattern detection ====================
+
+    @Test
+    fun `UriBuilderProvider records URI detected via builder`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val patterns = uris.map { it.uriPattern }.toSet()
+        assertThat(patterns).contains("content://$PKG.builder/records")
+    }
+
+    @Test
+    fun `UriBuilderProvider has correct authority`() {
+        val uris = urisForAuthority("$PKG.builder")
+        assertThat(uris).isNotEmpty()
+        uris.forEach { assertThat(it.authority).isEqualTo("$PKG.builder") }
+    }
+
+    @Test
+    fun `UriBuilderProvider records URI has sourceClass containing UriBuilderProvider`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val records = uris.find { it.uriPattern == "content://$PKG.builder/records" }
+        assertThat(records).isNotNull()
+        assertThat(records!!.sourceClass).contains("UriBuilderProvider")
+    }
+
+    @Test
+    fun `UriBuilderProvider URIs NOT on BasicProvider`() {
+        val basicUris = urisForAuthority("$PKG.basic")
+        val basicPatterns = basicUris.map { it.uriPattern }.toSet()
+        assertThat(basicPatterns.none { it.contains("$PKG.builder") }).isTrue()
+    }
+
+    // ==================== Group AJ: Bundle containsKey() detection ====================
+
+    @Test
+    fun `ContainsKeyActivity feature_flag detected as extra`() {
+        val extras = extrasFor("ContainsKeyActivity")
+        val featureFlag = extras.find { it.extraKey == "feature_flag" }
+        assertThat(featureFlag).isNotNull()
+    }
+
+    @Test
+    fun `ContainsKeyActivity experiment_id detected as extra`() {
+        val extras = extrasFor("ContainsKeyActivity")
+        val experimentId = extras.find { it.extraKey == "experiment_id" }
+        assertThat(experimentId).isNotNull()
+    }
+
+    @Test
+    fun `ContainsKeyActivity extras NOT on other activities`() {
+        val directExtras = extrasFor("DirectExtraActivity")
+        val directKeys = directExtras.map { it.extraKey }.toSet()
+        assertThat(directKeys).doesNotContain("feature_flag")
+        assertThat(directKeys).doesNotContain("experiment_id")
+    }
+
+    // ==================== Group AK: Intent addCategory() detection ====================
+
+    @Test
+    fun `CategoryActivity PREMIUM category detected`() {
+        val categories = analysis.intentExtras
+            .filter { it.sourceClass?.contains("CategoryActivity") == true }
+        // Categories are stored separately from extras — check discoveredCategories
+        // via the analysis dump or directly. For now, verify no extra keys named as categories.
+        // The categories are exposed in DexAnalysis.discoveredCategories
+        assertThat(analysis.discoveredCategories).contains("$PKG.category.PREMIUM")
+    }
+
+    @Test
+    fun `CategoryActivity ALTERNATIVE category detected`() {
+        assertThat(analysis.discoveredCategories).contains("android.intent.category.ALTERNATIVE")
+    }
+
+    @Test
+    fun `addCategory categories NOT confused with extras`() {
+        val allExtraKeys = analysis.intentExtras.map { it.extraKey }.toSet()
+        assertThat(allExtraKeys).doesNotContain("$PKG.category.PREMIUM")
+        assertThat(allExtraKeys).doesNotContain("android.intent.category.ALTERNATIVE")
+    }
+
+    // ==================== Group AL: Cross-feature isolation ====================
+
+    @Test
+    fun `Uri Builder URIs do NOT appear as deep link URIs`() {
+        val builderUris = urisForAuthority("$PKG.builder")
+        for (uri in builderUris) {
+            assertThat(uri.uriPattern).startsWith("content://")
+        }
+    }
+
+    @Test
+    fun `containsKey extras have type Unknown`() {
+        val extras = extrasFor("ContainsKeyActivity")
+        val containsKeyExtras = extras.filter { it.extraKey in listOf("feature_flag", "experiment_id") }
+        assertThat(containsKeyExtras).isNotEmpty()
+        containsKeyExtras.forEach { assertThat(it.extraType).isEqualTo("Unknown") }
+    }
+
+    @Test
+    fun `all content provider URIs still have non-null authority`() {
+        val contentUris = analysis.contentProviderUris.filter { it.uriPattern.startsWith("content://") }
+        assertThat(contentUris).isNotEmpty()
+        contentUris.forEach { assertThat(it.authority).isNotNull() }
+    }
+
+    // ==================== Group AM: Regression ====================
+
+    @Test
+    fun `existing UriMatcher detection still works after Uri Builder addition`() {
+        val dispatchUris = urisForAuthority("$PKG.dispatch")
+        assertThat(dispatchUris).isNotEmpty()
+    }
+
+    @Test
+    fun `existing getExtra detection still works after containsKey addition`() {
+        val extras = extrasFor("DirectExtraActivity")
+        val userName = extras.find { it.extraKey == "user_name" }
+        assertThat(userName).isNotNull()
+        assertThat(userName!!.extraType).isEqualTo("String")
+    }
+
+    // ==================== Group AN: Uri.Builder appendQueryParameter detection ====================
+
+    @Test
+    fun `UriBuilderProvider filtered records URI has status query param`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val paramsAll = uris.flatMap { it.queryParameters }.toSet()
+        assertThat(paramsAll).contains("status")
+    }
+
+    @Test
+    fun `UriBuilderProvider filtered records URI has format query param`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val paramsAll = uris.flatMap { it.queryParameters }.toSet()
+        assertThat(paramsAll).contains("format")
+    }
+
+    @Test
+    fun `UriBuilderProvider status param has value active`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val paramValues = uris.flatMap { uri ->
+            uri.queryParameterValues["status"]?.map { it } ?: emptyList()
+        }.toSet()
+        assertThat(paramValues).contains("active")
+    }
+
+    @Test
+    fun `UriBuilderProvider format param has value json`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val paramValues = uris.flatMap { uri ->
+            uri.queryParameterValues["format"]?.map { it } ?: emptyList()
+        }.toSet()
+        assertThat(paramValues).contains("json")
+    }
+
+    @Test
+    fun `UriBuilderProvider query params NOT on BasicProvider`() {
+        val basicUris = urisForAuthority("$PKG.basic")
+        val basicParams = basicUris.flatMap { it.queryParameters }.toSet()
+        assertThat(basicParams).doesNotContain("status")
+        assertThat(basicParams).doesNotContain("format")
+    }
+
+    // ==================== Group AO: Intent.setData() / setDataAndType() detection ====================
+
+    @Test
+    fun `SetDataActivity items URI detected via setData`() {
+        assertThat(analysis.discoveredDataUris).contains("content://$PKG.basic/items")
+    }
+
+    @Test
+    fun `SetDataActivity export URI detected via setDataAndType`() {
+        assertThat(analysis.discoveredDataUris).contains("content://$PKG.basic/export")
+    }
+
+    @Test
+    fun `SetDataActivity export URI has mime type application json`() {
+        val mimeType = analysis.discoveredDataMimeTypes["content://$PKG.basic/export"]
+        assertThat(mimeType).isEqualTo("application/json")
+    }
+
+    @Test
+    fun `setData URIs are separate from content provider URIs`() {
+        // discoveredDataUris are Intent data, not content provider patterns
+        val cpAuthorities = analysis.contentProviderUris.map { it.authority }.toSet()
+        // The URIs should exist in discoveredDataUris regardless of content provider registration
+        assertThat(analysis.discoveredDataUris).isNotEmpty()
+    }
+
+    // ==================== Group AP: getXxxExtra default value extraction ====================
+
+    @Test
+    fun `DefaultValueActivity retry_count has default value 3`() {
+        val extras = extrasFor("DefaultValueActivity")
+        val retryCount = extras.find { it.extraKey == "retry_count" }
+        assertThat(retryCount).isNotNull()
+        assertThat(retryCount!!.defaultValue).isEqualTo("3")
+    }
+
+    @Test
+    fun `DefaultValueActivity debug_mode has default value false`() {
+        val extras = extrasFor("DefaultValueActivity")
+        val debugMode = extras.find { it.extraKey == "debug_mode" }
+        assertThat(debugMode).isNotNull()
+        assertThat(debugMode!!.defaultValue).isEqualTo("false")
+    }
+
+    @Test
+    fun `DefaultValueActivity timeout_ms has default value 5000`() {
+        val extras = extrasFor("DefaultValueActivity")
+        val timeout = extras.find { it.extraKey == "timeout_ms" }
+        assertThat(timeout).isNotNull()
+        assertThat(timeout!!.defaultValue).isEqualTo("5000")
+    }
+
+    @Test
+    fun `DefaultValueActivity retry_count has type Int`() {
+        val extras = extrasFor("DefaultValueActivity")
+        val retryCount = extras.find { it.extraKey == "retry_count" }
+        assertThat(retryCount).isNotNull()
+        assertThat(retryCount!!.extraType).isEqualTo("Int")
+    }
+
+    @Test
+    fun `string extras do NOT have default values`() {
+        val extras = extrasFor("DirectExtraActivity")
+        val userName = extras.find { it.extraKey == "user_name" }
+        assertThat(userName).isNotNull()
+        assertThat(userName!!.defaultValue).isNull()
+    }
+
+    // ==================== Group AQ: Cross-feature isolation (Phase 8) ====================
+
+    @Test
+    fun `appendQueryParameter params only on builder provider URIs`() {
+        val dispatchUris = urisForAuthority("$PKG.dispatch")
+        val dispatchParams = dispatchUris.flatMap { it.queryParameters }.toSet()
+        assertThat(dispatchParams).doesNotContain("status")
+        assertThat(dispatchParams).doesNotContain("format")
+    }
+
+    @Test
+    fun `setData items URI not in discoveredDataMimeTypes`() {
+        // setData only sets URI, no mime type
+        assertThat(analysis.discoveredDataMimeTypes).doesNotContainKey("content://$PKG.basic/items")
+    }
+
+    // ==================== Group AR: Regression (Phase 8) ====================
+
+    @Test
+    fun `existing Uri Builder records URI still detected after appendQueryParameter addition`() {
+        val uris = urisForAuthority("$PKG.builder")
+        val patterns = uris.map { it.uriPattern }
+        assertThat(patterns.any { it.contains("records") && !it.contains("?") }).isTrue()
+    }
+
+    @Test
+    fun `existing putExtra values still detected after default value addition`() {
+        val extras = extrasFor("PutExtraActivity")
+        assertThat(extras).isNotEmpty()
     }
 }

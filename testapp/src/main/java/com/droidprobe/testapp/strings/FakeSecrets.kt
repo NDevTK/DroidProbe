@@ -27,6 +27,9 @@ object FakeSecrets {
     // MongoDB connection string pattern
     @JvmField val MONGO_URI = "mongodb+srv://user:pass@cluster.mongodb.net/db"
 
+    // Mapbox token pattern (starts with pk.eyJ or sk.eyJ)
+    @JvmField val MAPBOX_TOKEN = "pk.eyJ1IjoidGVzdHVzZXIiLCJhIjoiY2xhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ejAxMjM0NTY3ODkwMTIifQ.abcdefghijklmnopqrstuvwxyz012345"
+
     // Force class initialization so strings appear in DEX
     fun init() {
         AWS_KEY.length
