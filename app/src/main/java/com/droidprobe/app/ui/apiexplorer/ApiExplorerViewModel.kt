@@ -1,4 +1,4 @@
-package com.droidprobe.app.ui.googleapi
+package com.droidprobe.app.ui.apiexplorer
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-data class GoogleApiUiState(
+data class ApiExplorerUiState(
     val rootUrl: String = "",
     val apiKeys: List<String> = emptyList(),
     val selectedApiKey: String? = null,
@@ -34,15 +34,22 @@ data class GoogleApiUiState(
     val autoExecuteResult: Pair<DiscoveryMethod, ExecutionResult>? = null
 )
 
-class GoogleApiExplorerViewModel(
+/** Categories of sensitive strings that represent API keys/tokens (vs other secrets). */
+val KEY_CATEGORIES = setOf(
+    "Google API Key", "Stripe Key", "Square Key", "Slack Token",
+    "GitHub Token", "GitLab Token", "Twilio Key", "SendGrid Key",
+    "Mapbox Token", "Algolia Key", "Bearer Token"
+)
+
+class ApiExplorerViewModel(
     private val packageName: String,
     private val rootUrl: String,
     private val fetcher: ApiSpecFetcher,
     private val analysisRepository: AnalysisRepository
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(GoogleApiUiState(rootUrl = rootUrl))
-    val uiState: StateFlow<GoogleApiUiState> = _uiState.asStateFlow()
+    private val _uiState = MutableStateFlow(ApiExplorerUiState(rootUrl = rootUrl))
+    val uiState: StateFlow<ApiExplorerUiState> = _uiState.asStateFlow()
 
     init {
         loadApiKeys()
@@ -51,13 +58,8 @@ class GoogleApiExplorerViewModel(
 
     private fun loadApiKeys() {
         val dex = analysisRepository.getCachedDex(packageName) ?: return
-        val keyCategories = setOf(
-            "Google API Key", "Stripe Key", "Square Key", "Slack Token",
-            "GitHub Token", "GitLab Token", "Twilio Key", "SendGrid Key",
-            "Mapbox Token", "Algolia Key", "Bearer Token"
-        )
         val allKeys = dex.sensitiveStrings
-            .filter { it.category in keyCategories }
+            .filter { it.category in KEY_CATEGORIES }
 
         if (allKeys.isEmpty()) return
 
@@ -269,7 +271,7 @@ class GoogleApiExplorerViewModel(
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return GoogleApiExplorerViewModel(packageName, rootUrl, fetcher, analysisRepository) as T
+            return ApiExplorerViewModel(packageName, rootUrl, fetcher, analysisRepository) as T
         }
     }
 }

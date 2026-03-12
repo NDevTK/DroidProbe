@@ -25,14 +25,17 @@ data class LaunchableTarget(
     val categories: List<String>,
     val dataSchemes: List<String>,
     val discoveredExtras: List<IntentInfo>,
-    val discoveredDataUris: List<String> = emptyList()
+    val discoveredDataUris: List<String> = emptyList(),
+    val discoveredMimeTypes: Map<String, String> = emptyMap(), // uri -> mimeType from setDataAndType
+    val discoveredCategories: List<String> = emptyList() // categories found in bytecode beyond manifest
 )
 
 data class ExtraEntry(
     val key: String = "",
     val value: String = "",
     val type: String = "String",
-    val suggestedValues: List<String> = emptyList()
+    val suggestedValues: List<String> = emptyList(),
+    val associatedAction: String? = null
 )
 
 data class QueryParamEntry(
@@ -120,6 +123,11 @@ class IntentBuilderViewModel(
                 cachedSchemeByAuthority = schemeByAuthority
                 cachedProducerUrls = (dex?.allUrlStrings ?: emptyList()) +
                     (dex?.deepLinkUriStrings ?: emptyList())
+
+                // Collect Intent.setData()/setDataAndType() URIs
+                val intentDataUris = dex?.discoveredDataUris ?: emptySet()
+                val intentMimeTypes = dex?.discoveredDataMimeTypes ?: emptyMap()
+                val dexCategories = dex?.discoveredCategories ?: emptySet()
 
                 val extrasByComponent = discoveredExtras.groupBy { it.associatedComponent }
 
@@ -229,6 +237,29 @@ class IntentBuilderViewModel(
                             }
                         }
 
+                        // Add Intent.setData()/setDataAndType() URIs matching this component's schemes
+                        val compAllSchemes = (allSchemes + filterDeepLinkUris.mapNotNull { uri ->
+                            val idx = uri.indexOf("://")
+                            if (idx > 0) uri.substring(0, idx) else null
+                        }).toSet()
+                        for (dataUri in intentDataUris) {
+                            val idx = dataUri.indexOf("://")
+                            val uriScheme = if (idx > 0) dataUri.substring(0, idx) else continue
+                            if (uriScheme in compAllSchemes || compAllSchemes.isEmpty()) {
+                                if (seenUris.add(dataUri)) compDataUris.add(dataUri)
+                            }
+                        }
+
+                        // Collect MIME types for discovered data URIs
+                        val compMimeTypes = mutableMapOf<String, String>()
+                        for (uri in compDataUris) {
+                            intentMimeTypes[uri]?.let { compMimeTypes[uri] = it }
+                        }
+
+                        // Categories from bytecode not already in manifest
+                        val manifestCatSet = allCategories.toSet()
+                        val extraCategories = dexCategories.filter { it !in manifestCatSet }
+
                         targets.add(
                             LaunchableTarget(
                                 component = comp,
@@ -237,7 +268,9 @@ class IntentBuilderViewModel(
                                 categories = allCategories,
                                 dataSchemes = allSchemes,
                                 discoveredExtras = compExtras,
-                                discoveredDataUris = compDataUris
+                                discoveredDataUris = compDataUris,
+                                discoveredMimeTypes = compMimeTypes,
+                                discoveredCategories = extraCategories
                             )
                         )
                     }
@@ -258,7 +291,8 @@ class IntentBuilderViewModel(
                 key = info.extraKey,
                 value = "",
                 type = info.extraType ?: "String",
-                suggestedValues = info.possibleValues
+                suggestedValues = info.possibleValues,
+                associatedAction = info.associatedAction
             )
         }
         _uiState.update {

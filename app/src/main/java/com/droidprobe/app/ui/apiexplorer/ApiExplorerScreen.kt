@@ -1,4 +1,4 @@
-package com.droidprobe.app.ui.googleapi
+package com.droidprobe.app.ui.apiexplorer
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -69,14 +69,14 @@ import com.droidprobe.app.data.model.KeyStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GoogleApiExplorerScreen(
+fun ApiExplorerScreen(
     packageName: String,
     rootUrl: String,
     onNavigateBack: () -> Unit,
-    viewModel: GoogleApiExplorerViewModel = viewModel(
+    viewModel: ApiExplorerViewModel = viewModel(
         factory = run {
             val app = LocalContext.current.applicationContext as DroidProbeApplication
-            GoogleApiExplorerViewModel.Factory(
+            ApiExplorerViewModel.Factory(
                 packageName = packageName,
                 rootUrl = rootUrl,
                 fetcher = app.appModule.apiSpecFetcher,

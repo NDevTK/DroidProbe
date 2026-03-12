@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.droidprobe.app.data.model.ContentProviderCallInfo
 import com.droidprobe.app.data.model.ProviderComponent
 import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.interaction.ContentProviderInteractor
@@ -27,6 +28,7 @@ data class ContentProviderUiState(
     val packageName: String = "",
     val providers: List<ProviderComponent> = emptyList(),
     val queryableUris: List<QueryableUri> = emptyList(),
+    val callMethods: List<ContentProviderCallInfo> = emptyList(),
     val expandedUri: String? = null,
     val error: String? = null
 )
@@ -101,7 +103,8 @@ class ContentProviderViewModel(
                 _uiState.update {
                     it.copy(
                         providers = manifest.providers,
-                        queryableUris = uris
+                        queryableUris = uris,
+                        callMethods = dex?.contentProviderCalls ?: emptyList()
                     )
                 }
             } catch (_: Exception) { }

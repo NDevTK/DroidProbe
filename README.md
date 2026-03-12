@@ -21,9 +21,9 @@ The test release of DroidProbe is published after joining <https://groups.google
   - FileProvider path configurations from binary XML resources and `getUriForFile()` bytecode extraction (resolves actual filenames from `File` constructor arguments)
   - Raw `content://` and deep link string constants, all URL strings, and sensitive strings (API keys, tokens, credentials)
 - **Security Warning Detection** — DEX-level pattern analysis flags potential vulnerabilities: WebView JavaScript/file access enabled, intent redirection (`getParcelableExtra` → `startActivity`), path traversal via `Uri.getLastPathSegment()`, unprotected exported components, and broad FileProvider path configurations
-- **API Spec Explorer** — Fetches and parses API specification documents from discovered endpoints, supporting Google Discovery REST (`/$discovery/rest`), OpenAPI 3.x, and Swagger 2.0 formats. Auto-detects format, presents a browsable resource/method tree, and allows executing API calls directly with extracted keys and tokens. CFG-based forward taint analysis tracks where each extracted credential flows through bytecode to HTTP sinks (e.g., `addHeader` value arguments), associating keys only with endpoints they actually reach via inter-procedural dataflow
-- **Content Provider Explorer** — Discovered URIs shown as tappable cards with "Query All" batch querying; per-URI inline results showing row/column counts; tap to expand full result table
-- **Intent Launcher** — Exported components grouped by type with one-tap launch; expandable extras editor with type-appropriate keyboards, deep link URI selector with query parameter fields, pre-filled from bytecode analysis; BROWSABLE badge highlights browser-launchable attack surfaces; copy/share deep links for all browsable intents (custom scheme URIs or `intent://` format); ordered broadcast result capture showing resultCode, resultData, and resultExtras
+- **API Explorer** — Unified API client for all discovered endpoints. Fetches and parses API specification documents supporting Google Discovery REST (`/$discovery/rest`), OpenAPI 3.x, and Swagger 2.0 formats. Also includes DEX-extracted endpoints not in any spec document. Auto-detects format, presents a browsable resource/method tree, and allows executing API calls directly with extracted keys and tokens. CFG-based forward taint analysis tracks where each extracted credential flows through bytecode to HTTP sinks (e.g., `addHeader` value arguments), associating keys only with endpoints they actually reach via inter-procedural dataflow
+- **Content Provider Explorer** — Discovered URIs shown as tappable cards with "Query All" batch querying; per-URI inline results showing row/column counts; tap to expand full result table; `ContentResolver.call()` method names and arguments; per-provider path permissions with read/write granularity and `grantUriPermissions` flag
+- **Intent Launcher** — Exported components grouped by type with one-tap launch; expandable extras editor with type-appropriate keyboards and associated action display; deep link URI selector with query parameter fields and MIME type annotations, pre-filled from bytecode analysis including `Intent.setData()`/`setDataAndType()` URIs; bytecode-discovered intent categories shown alongside manifest categories; BROWSABLE badge highlights browser-launchable attack surfaces; copy/share deep links for all browsable intents (custom scheme URIs or `intent://` format); ordered broadcast result capture showing resultCode, resultData, and resultExtras
 - **FileProvider Browser** — Discovered paths as tappable cards with "Probe All" batch probing; cross-references XML path roots with code-discovered filenames to build probeable URIs; inline probe results showing accessibility, size, MIME type, and content preview
 - **Class Hierarchy Resolution** — Extras are mapped to components via actual inheritance chain tracing, not name guessing
 
@@ -96,7 +96,7 @@ app/src/main/java/com/droidprobe/app/
 │   ├── ContentProviderInteractor.kt        # Query/insert/update/delete via ContentResolver
 │   ├── IntentLauncher.kt                   # Build and launch intents, ordered broadcast results
 │   ├── FileProviderAccessor.kt             # Probe FileProvider URIs
-│   └── ApiSpecFetcher.kt                   # Google Discovery / OpenAPI / Swagger fetcher & executor
+│   └── ApiSpecFetcher.kt                   # Discovery / OpenAPI / Swagger fetcher & executor
 ├── navigation/
 │   ├── Screen.kt                           # Type-safe route definitions
 │   └── DroidProbeNavGraph.kt               # NavHost wiring
@@ -113,7 +113,7 @@ app/src/main/java/com/droidprobe/app/
 │   ├── providers/                          # Content provider explorer (Query All, inline results)
 │   ├── intents/                            # Intent launcher (deep link sharing, broadcast results)
 │   ├── fileprovider/                       # FileProvider browser (Probe All, file path cross-ref)
-│   ├── googleapi/                          # API Spec Explorer (Discovery/OpenAPI/Swagger)
+│   ├── apiexplorer/                        # API Explorer (Discovery/OpenAPI/Swagger + DEX endpoints)
 │   ├── components/                         # Shared UI components
 │   └── theme/                              # Material 3 dark theme
 ├── DroidProbeApplication.kt
@@ -131,4 +131,4 @@ JAVA_HOME="/path/to/android-studio/jbr" ./gradlew assembleDebug
 ## Permissions
 
 - `QUERY_ALL_PACKAGES` — Required on Android 11+ to enumerate installed apps. Allowed for security tools on Play Store.
-- `INTERNET` — Required for the API Spec Explorer to fetch discovery documents and execute API calls against discovered endpoints.
+- `INTERNET` — Required for the API Explorer to fetch discovery documents and execute API calls against discovered endpoints.

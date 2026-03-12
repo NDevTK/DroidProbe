@@ -139,6 +139,195 @@ fun ContentProviderScreen(
                 )
             }
 
+            // ContentResolver.call() methods
+            if (uiState.callMethods.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "call() Methods (${uiState.callMethods.size})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+                items(uiState.callMethods, key = { "${it.authority}:${it.methodName}:${it.arg}" }) { call ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text(
+                                        text = "call",
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.tertiary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = call.methodName,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            if (call.authority != null) {
+                                Text(
+                                    text = "authority: ${call.authority}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (call.arg != null) {
+                                Text(
+                                    text = "arg: ${call.arg}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (call.sourceClass.isNotEmpty()) {
+                                Text(
+                                    text = call.sourceClass.removePrefix("L").removeSuffix(";").replace('/', '.'),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Provider details (permissions, path permissions)
+            val exportedProviders = uiState.providers.filter { it.isExported }
+            if (exportedProviders.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "Provider Details",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+                items(exportedProviders, key = { it.name }) { provider ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = provider.name.substringAfterLast('.'),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            if (provider.authority != null) {
+                                Text(
+                                    text = provider.authority,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                if (provider.grantUriPermissions) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                                        shape = MaterialTheme.shapes.small
+                                    ) {
+                                        Text(
+                                            text = "grantUriPermissions",
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                                if (provider.readPermission != null) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                                        shape = MaterialTheme.shapes.small
+                                    ) {
+                                        Text(
+                                            text = "R: ${provider.readPermission.substringAfterLast('.')}",
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                }
+                                if (provider.writePermission != null) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                                        shape = MaterialTheme.shapes.small
+                                    ) {
+                                        Text(
+                                            text = "W: ${provider.writePermission.substringAfterLast('.')}",
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                }
+                            }
+                            // Path permissions
+                            if (provider.pathPermissions.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                provider.pathPermissions.forEach { pp ->
+                                    Row(
+                                        modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Text(
+                                                text = pp.type,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = pp.path,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (pp.readPermission != null || pp.writePermission != null) {
+                                            val perms = listOfNotNull(
+                                                pp.readPermission?.let { "R:${it.substringAfterLast('.')}" },
+                                                pp.writePermission?.let { "W:${it.substringAfterLast('.')}" }
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = perms.joinToString(),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Error
             if (uiState.error != null) {
                 item {

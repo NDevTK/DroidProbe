@@ -296,7 +296,7 @@ private fun TargetCard(
             }
 
             // Actions and categories
-            if (target.actions.isNotEmpty()) {
+            if (target.actions.isNotEmpty() || target.discoveredCategories.isNotEmpty()) {
                 FlowRow(
                     modifier = Modifier.padding(top = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -312,6 +312,19 @@ private fun TargetCard(
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                    }
+                    target.discoveredCategories.forEach { cat ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Text(
+                                text = cat.substringAfterLast('.'),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary
                             )
                         }
                     }
@@ -445,6 +458,7 @@ private fun TargetCard(
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             pageUris.forEach { uri ->
+                                val mimeType = target.discoveredMimeTypes[uri]
                                 FilterChip(
                                     selected = dataUri == uri,
                                     onClick = {
@@ -455,7 +469,7 @@ private fun TargetCard(
                                             .substringAfter('/')
                                             .ifEmpty { uri }
                                         Text(
-                                            text = display,
+                                            text = if (mimeType != null) "$display ($mimeType)" else display,
                                             style = MaterialTheme.typography.labelSmall,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
@@ -473,8 +487,9 @@ private fun TargetCard(
                         }
 
                         if (dataUri.isNotBlank()) {
+                            val selectedMime = target.discoveredMimeTypes[dataUri]
                             Text(
-                                text = dataUri,
+                                text = if (selectedMime != null) "$dataUri (type: $selectedMime)" else dataUri,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.padding(top = 2.dp)
@@ -514,12 +529,27 @@ private fun TargetCard(
 
                         extras.forEachIndexed { index, entry ->
                             Column {
-                                Text(
-                                    text = entry.key,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = entry.key,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (entry.associatedAction != null) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Text(
+                                                text = entry.associatedAction.substringAfterLast('.'),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
+                                    }
+                                }
 
                                 SuggestableTextField(
                                     value = entry.value,

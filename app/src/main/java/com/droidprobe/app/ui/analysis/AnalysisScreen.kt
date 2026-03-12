@@ -50,6 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.droidprobe.app.DroidProbeApplication
 import com.droidprobe.app.data.model.ManifestAnalysis
 import com.droidprobe.app.data.model.SensitiveString
+import com.droidprobe.app.ui.apiexplorer.KEY_CATEGORIES
 import com.droidprobe.app.ui.components.SectionHeader
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,7 +61,7 @@ fun AnalysisScreen(
     onNavigateToContentProvider: (String) -> Unit,
     onNavigateToIntentBuilder: (String) -> Unit,
     onNavigateToFileProvider: (String) -> Unit,
-    onNavigateToGoogleApi: (String, String) -> Unit = { _, _ -> },
+    onNavigateToApiExplorer: (String, String) -> Unit = { _, _ -> },
     viewModel: AnalysisViewModel = viewModel(
         factory = run {
             val app = LocalContext.current.applicationContext as DroidProbeApplication
@@ -215,13 +216,8 @@ fun AnalysisScreen(
                     uiState.dexAnalysis?.let { dex ->
                         // Unified API Surfaces: endpoints grouped with associated keys
                         if (dex.apiEndpoints.isNotEmpty() || dex.sensitiveStrings.isNotEmpty()) {
-                            val keyCategories = setOf(
-                                "Google API Key", "Stripe Key", "Square Key", "Slack Token",
-                                "GitHub Token", "GitLab Token", "Twilio Key", "SendGrid Key",
-                                "Mapbox Token", "Algolia Key", "Bearer Token"
-                            )
-                            val keySecrets = dex.sensitiveStrings.filter { it.category in keyCategories }
-                            val otherSecrets = dex.sensitiveStrings.filter { it.category !in keyCategories }
+                            val keySecrets = dex.sensitiveStrings.filter { it.category in KEY_CATEGORIES }
+                            val otherSecrets = dex.sensitiveStrings.filter { it.category !in KEY_CATEGORIES }
 
                             val grouped = dex.apiEndpoints.groupBy { it.baseUrl.ifEmpty { "Unknown" } }
                             val sortedGroups = grouped.entries.sortedWith(
@@ -264,13 +260,13 @@ fun AnalysisScreen(
                                             host = host,
                                             count = endpoints.size,
                                             onExplore = if (isExplorable || associatedKeys.isNotEmpty()) {
-                                                { onNavigateToGoogleApi(packageName, host) }
+                                                { onNavigateToApiExplorer(packageName, host) }
                                             } else null
                                         )
                                         // Show associated keys inline
                                         associatedKeys.forEach { secret ->
                                             KeyRow(secret = secret, onExplore = {
-                                                onNavigateToGoogleApi(packageName, host)
+                                                onNavigateToApiExplorer(packageName, host)
                                             })
                                         }
                                         endpoints.sortedBy { it.path }.forEach { endpoint ->
@@ -293,7 +289,7 @@ fun AnalysisScreen(
                                             KeyRow(
                                                 secret = secret,
                                                 onExplore = if (explorableHosts.isNotEmpty()) {
-                                                    { onNavigateToGoogleApi(packageName, explorableHosts.first()) }
+                                                    { onNavigateToApiExplorer(packageName, explorableHosts.first()) }
                                                 } else null
                                             )
                                         }
@@ -633,63 +629,93 @@ private fun isExplorableApi(baseUrl: String): Boolean {
 @Composable
 private fun EndpointRow(endpoint: com.droidprobe.app.data.model.ApiEndpoint) {
     val context = LocalContext.current
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { copyToClipboard(context, "URL", endpoint.fullUrl) }
-            .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(start = 8.dp, top = 2.dp, bottom = 2.dp)
     ) {
-        if (endpoint.httpMethod != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                shape = MaterialTheme.shapes.small
-            ) {
-                Text(
-                    text = endpoint.httpMethod,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (endpoint.httpMethod != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = endpoint.httpMethod,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
             }
-            Spacer(modifier = Modifier.width(4.dp))
+            if (endpoint.sourceType != "literal") {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = endpoint.sourceType,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            if (endpoint.hasBody) {
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = "body",
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = endpoint.path.ifEmpty { endpoint.fullUrl },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (endpoint.fullUrl.startsWith("http://") || endpoint.fullUrl.startsWith("https://")) {
+                IconButton(
+                    onClick = {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(endpoint.fullUrl)))
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = "Open in browser",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
-        if (endpoint.sourceType != "literal") {
-            Surface(
-                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
-                shape = MaterialTheme.shapes.small
-            ) {
-                Text(
-                    text = endpoint.sourceType,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary
-                )
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-        }
-        Text(
-            text = endpoint.path.ifEmpty { endpoint.fullUrl },
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        if (endpoint.fullUrl.startsWith("http://") || endpoint.fullUrl.startsWith("https://")) {
-            IconButton(
-                onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(endpoint.fullUrl)))
-                },
-                modifier = Modifier.size(32.dp)
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.OpenInNew,
-                    contentDescription = "Open in browser",
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        // Show extracted params (query, path, header)
+        val paramParts = mutableListOf<String>()
+        if (endpoint.queryParams.isNotEmpty()) paramParts.add("query: ${endpoint.queryParams.joinToString()}")
+        if (endpoint.pathParams.isNotEmpty()) paramParts.add("path: ${endpoint.pathParams.joinToString()}")
+        if (endpoint.headerParams.isNotEmpty()) paramParts.add("headers: ${endpoint.headerParams.joinToString()}")
+        if (paramParts.isNotEmpty()) {
+            Text(
+                text = paramParts.joinToString(" | "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp, top = 1.dp)
+            )
         }
     }
 }
