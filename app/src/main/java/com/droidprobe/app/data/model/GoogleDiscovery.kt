@@ -26,7 +26,8 @@ data class DiscoveryMethod(
     val parameters: Map<String, DiscoveryParameter>,
     val parameterOrder: List<String>,
     val scopes: List<String>,
-    val source: String = ""
+    val source: String = "",
+    val hasBody: Boolean = false
 )
 
 data class DiscoveryParameter(

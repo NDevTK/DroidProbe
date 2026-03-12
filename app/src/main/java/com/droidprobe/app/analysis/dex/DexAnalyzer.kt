@@ -66,6 +66,8 @@ class DexAnalyzer {
         val uriExtractor = UriPatternExtractor(manifestAnalysis, classIndex)
         val intentExtractor = IntentExtraExtractor(classHierarchy, componentClasses, classIndex)
         val callExtractor = ContentProviderCallExtractor()
+        val crudExtractor = ContentProviderCrudExtractor(classHierarchy)
+        val orderedBroadcastExtractor = OrderedBroadcastExtractor(classHierarchy)
         val urlExtractor = UrlExtractor(classIndex)
         val securityDetector = SecurityPatternDetector(classHierarchy)
 
@@ -108,6 +110,8 @@ class DexAnalyzer {
                 intentExtractor.process(classDef)
                 fileProviderExtractor.process(classDef)
                 callExtractor.process(classDef)
+                crudExtractor.process(classDef)
+                orderedBroadcastExtractor.process(classDef)
                 urlExtractor.process(classDef)
                 securityDetector.process(classDef)
             }
@@ -341,6 +345,8 @@ class DexAnalyzer {
             rawContentUriStrings = stringCollector.getContentUriStrings(),
             deepLinkUriStrings = stringCollector.getDeepLinkUriStrings(),
             contentProviderCalls = callExtractor.getResults(),
+            crudOperations = crudExtractor.getResults(),
+            orderedBroadcasts = orderedBroadcastExtractor.getResults(),
             allUrlStrings = stringCollector.getAllUrlStrings(),
             sensitiveStrings = sensitiveStrings,
             apiEndpoints = apiEndpoints,

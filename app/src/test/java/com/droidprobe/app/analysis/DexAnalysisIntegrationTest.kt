@@ -123,6 +123,38 @@ class DexAnalysisIntegrationTest {
                             dataSchemes = emptyList(), dataAuthorities = emptyList(),
                             dataPaths = emptyList(), mimeTypes = emptyList()
                         ))
+                    ),
+                    // Permission-protected activity
+                    ExportedComponent(
+                        name = "$PKG.activities.PermissionProtectedActivity",
+                        isExported = true,
+                        permission = "$PKG.permission.ADMIN",
+                        intentFilters = listOf(IntentFilterInfo(
+                            actions = listOf("$PKG.action.PROTECTED"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = emptyList(), dataAuthorities = emptyList(),
+                            dataPaths = emptyList(), mimeTypes = emptyList()
+                        ))
+                    ),
+                    // MIME type activity
+                    ExportedComponent(
+                        name = "$PKG.activities.MimeTypeActivity",
+                        isExported = true,
+                        permission = null,
+                        intentFilters = listOf(
+                            IntentFilterInfo(
+                                actions = listOf("android.intent.action.VIEW"),
+                                categories = listOf("android.intent.category.DEFAULT"),
+                                dataSchemes = listOf("content"), dataAuthorities = emptyList(),
+                                dataPaths = emptyList(), mimeTypes = listOf("image/*")
+                            ),
+                            IntentFilterInfo(
+                                actions = listOf("android.intent.action.VIEW"),
+                                categories = listOf("android.intent.category.DEFAULT"),
+                                dataSchemes = listOf("file"), dataAuthorities = emptyList(),
+                                dataPaths = emptyList(), mimeTypes = listOf("application/pdf")
+                            )
+                        )
                     )
                 ),
                 services = listOf(
@@ -174,6 +206,16 @@ class DexAnalysisIntegrationTest {
                     provider("ParamProvider", "$PKG.params", true),
                     provider("StaticUriProvider", "$PKG.static", true),
                     provider("UriBuilderProvider", "$PKG.builder", true),
+                    ProviderComponent(
+                        name = "$PKG.providers.CrudProvider",
+                        authority = "$PKG.crud",
+                        isExported = true,
+                        permission = null,
+                        readPermission = "$PKG.permission.READ_ARTICLES",
+                        writePermission = "$PKG.permission.WRITE_ARTICLES",
+                        grantUriPermissions = false,
+                        pathPermissions = emptyList()
+                    ),
                     ProviderComponent(
                         name = "$PKG.security.PathTraversalProvider",
                         authority = "$PKG.traversal",
@@ -2435,6 +2477,307 @@ class DexAnalysisIntegrationTest {
                 val cmp = compareBy<SecurityWarning>({ it.severity.ordinal }, { it.category })
                 assertThat(cmp.compare(curr, next)).isAtMost(0)
             }
+        }
+    }
+
+    // ==================== ContentProvider CRUD Operations ====================
+
+    @Test
+    fun `CrudProvider INSERT operation detects ContentValues keys`() {
+        val insertOps = analysis.crudOperations.filter {
+            it.operation == "INSERT" &&
+                it.sourceClass.contains("CrudProvider")
+        }
+        assertThat(insertOps).isNotEmpty()
+        val keys = insertOps.flatMap { it.contentValuesKeys }.toSet()
+        assertThat(keys).contains("title")
+        assertThat(keys).contains("body")
+        assertThat(keys).contains("author")
+        assertThat(keys).contains("created_at")
+    }
+
+    @Test
+    fun `CrudProvider UPDATE operation detects ContentValues keys`() {
+        val updateOps = analysis.crudOperations.filter {
+            it.operation == "UPDATE" &&
+                it.sourceClass.contains("CrudProvider")
+        }
+        assertThat(updateOps).isNotEmpty()
+        val keys = updateOps.flatMap { it.contentValuesKeys }.toSet()
+        assertThat(keys).contains("title")
+        assertThat(keys).contains("body")
+        assertThat(keys).contains("updated_at")
+    }
+
+    @Test
+    fun `CrudProvider GET_TYPE detects MIME types`() {
+        val getTypeOps = analysis.crudOperations.filter {
+            it.operation == "GET_TYPE" &&
+                it.sourceClass.contains("CrudProvider")
+        }
+        assertThat(getTypeOps).isNotEmpty()
+        val mimeTypes = getTypeOps.flatMap { it.mimeTypes }.toSet()
+        assertThat(mimeTypes).contains("vnd.android.cursor.dir/vnd.droidprobe.article")
+        assertThat(mimeTypes).contains("vnd.android.cursor.item/vnd.droidprobe.article")
+    }
+
+    @Test
+    fun `CrudProvider CRUD operations NOT detected on BasicProvider`() {
+        val basicCrud = analysis.crudOperations.filter {
+            it.sourceClass.contains("BasicProvider")
+        }
+        // BasicProvider has stub insert/update/delete with no ContentValues access
+        for (op in basicCrud) {
+            assertThat(op.contentValuesKeys).isEmpty()
+        }
+    }
+
+    @Test
+    fun `CrudProvider DELETE operation detected`() {
+        val deleteOps = analysis.crudOperations.filter {
+            it.operation == "DELETE" &&
+                it.sourceClass.contains("CrudProvider")
+        }
+        // DELETE is detected even without ContentValues keys
+        assertThat(deleteOps).isNotEmpty()
+    }
+
+    // ==================== Ordered Broadcast Results ====================
+
+    @Test
+    fun `OrderedReceiver detected as ordered broadcast`() {
+        val ordered = analysis.orderedBroadcasts.filter {
+            it.sourceClass.contains("OrderedReceiver")
+        }
+        assertThat(ordered).hasSize(1)
+        val info = ordered.first()
+        assertThat(info.setsResultCode).isTrue()
+        assertThat(info.setsResultData).isTrue()
+        assertThat(info.setsResultExtras).isTrue()
+    }
+
+    @Test
+    fun `OrderedReceiver result extras keys detected`() {
+        val ordered = analysis.orderedBroadcasts.first {
+            it.sourceClass.contains("OrderedReceiver")
+        }
+        assertThat(ordered.resultExtrasKeys).contains("status")
+        assertThat(ordered.resultExtrasKeys).contains("timestamp")
+    }
+
+    @Test
+    fun `DataReceiver NOT detected as ordered broadcast`() {
+        val dataReceiverOrdered = analysis.orderedBroadcasts.filter {
+            it.sourceClass.contains("DataReceiver")
+        }
+        assertThat(dataReceiverOrdered).isEmpty()
+    }
+
+    @Test
+    fun `OrderedReceiver command extra has forward-scanned values`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.receivers.OrderedReceiver" &&
+                it.extraKey == "command"
+        }
+        assertThat(extras).isNotEmpty()
+        val values = extras.flatMap { it.possibleValues }.toSet()
+        assertThat(values).contains("start")
+        assertThat(values).contains("stop")
+        assertThat(values).contains("restart")
+    }
+
+    @Test
+    fun `OrderedReceiver priority_level has default value 0`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.receivers.OrderedReceiver" &&
+                it.extraKey == "priority_level"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("0")
+    }
+
+    // ==================== Enhanced Default Values ====================
+
+    @Test
+    fun `DefaultValueActivity retry_count has default 3`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "retry_count"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("3")
+    }
+
+    @Test
+    fun `DefaultValueActivity debug_mode has default false`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "debug_mode"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("false")
+    }
+
+    @Test
+    fun `DefaultValueActivity verbose has default true`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "verbose"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("true")
+    }
+
+    @Test
+    fun `DefaultValueActivity timeout_ms has default 5000`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "timeout_ms"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("5000")
+    }
+
+    @Test
+    fun `DefaultValueActivity max_size has default 100`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "max_size"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("100")
+    }
+
+    @Test
+    fun `DefaultValueActivity priority has default 1`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "priority"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("1")
+    }
+
+    @Test
+    fun `DefaultValueActivity label has no default (String extra)`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DefaultValueActivity" &&
+                it.extraKey == "label"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isNull()
+    }
+
+    // ==================== Permission-Protected Activity ====================
+
+    @Test
+    fun `PermissionProtectedActivity extras detected despite permission`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.PermissionProtectedActivity"
+        }
+        assertThat(extras).isNotEmpty()
+        val keys = extras.map { it.extraKey }.toSet()
+        assertThat(keys).contains("admin_command")
+        assertThat(keys).contains("access_level")
+    }
+
+    @Test
+    fun `PermissionProtectedActivity access_level has default 0`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.PermissionProtectedActivity" &&
+                it.extraKey == "access_level"
+        }
+        assertThat(extras).isNotEmpty()
+        assertThat(extras.first().defaultValue).isEqualTo("0")
+    }
+
+    @Test
+    fun `permission-protected extras NOT on unprotected activities`() {
+        val directExtras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.DirectExtraActivity"
+        }
+        val protectedKeys = setOf("admin_command", "access_level")
+        for (extra in directExtras) {
+            assertThat(extra.extraKey).isNotIn(protectedKeys)
+        }
+    }
+
+    // ==================== MIME Type Activity ====================
+
+    @Test
+    fun `MimeTypeActivity display_mode extra detected`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.MimeTypeActivity" &&
+                it.extraKey == "display_mode"
+        }
+        assertThat(extras).isNotEmpty()
+    }
+
+    @Test
+    fun `MimeTypeActivity display_mode has forward-scanned values`() {
+        val extras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.activities.MimeTypeActivity" &&
+                it.extraKey == "display_mode"
+        }
+        assertThat(extras).isNotEmpty()
+        val values = extras.flatMap { it.possibleValues }.toSet()
+        assertThat(values).contains("fullscreen")
+        assertThat(values).contains("thumbnail")
+        assertThat(values).contains("preview")
+    }
+
+    @Test
+    fun `MimeTypeActivity extras NOT on OrderedReceiver`() {
+        val receiverExtras = analysis.intentExtras.filter {
+            it.associatedComponent == "$PKG.receivers.OrderedReceiver"
+        }
+        for (extra in receiverExtras) {
+            assertThat(extra.extraKey).isNotEqualTo("display_mode")
+        }
+    }
+
+    // ==================== CrudProvider URI patterns ====================
+
+    @Test
+    fun `CrudProvider UriMatcher patterns detected`() {
+        val crudUris = analysis.contentProviderUris.filter {
+            it.authority == "$PKG.crud"
+        }
+        assertThat(crudUris).isNotEmpty()
+        val patterns = crudUris.map { it.uriPattern }.toSet()
+        assertThat(patterns).contains("content://$PKG.crud/articles")
+        assertThat(patterns).contains("content://$PKG.crud/articles/#")
+    }
+
+    // ==================== Cross-Extractor Isolation: New Patterns ====================
+
+    @Test
+    fun `CrudProvider ContentValues keys NOT in intent extras`() {
+        val crudKeys = analysis.crudOperations
+            .filter { it.sourceClass.contains("CrudProvider") }
+            .flatMap { it.contentValuesKeys }
+            .toSet()
+        val intentKeys = analysis.intentExtras.map { it.extraKey }.toSet()
+        // ContentValues keys like "title", "body" should not appear as intent extras
+        // unless they genuinely appear in an intent context too
+        for (key in crudKeys) {
+            if (key in intentKeys) {
+                // If it appears, it should NOT be on a provider class
+                val matching = analysis.intentExtras.filter { it.extraKey == key }
+                for (extra in matching) {
+                    assertThat(extra.sourceClass).doesNotContain("CrudProvider")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `ordered broadcast info NOT on non-receiver classes`() {
+        for (ob in analysis.orderedBroadcasts) {
+            // All ordered broadcast detections should be on receiver classes
+            assertThat(ob.sourceClass).doesNotContain("Activity")
+            assertThat(ob.sourceClass).doesNotContain("Service")
+            assertThat(ob.sourceClass).doesNotContain("Provider")
         }
     }
 

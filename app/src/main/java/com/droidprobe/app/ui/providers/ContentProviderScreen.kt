@@ -206,6 +206,76 @@ fun ContentProviderScreen(
                 }
             }
 
+            // CRUD operations (insert/update/delete/getType)
+            if (uiState.crudOperations.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "CRUD Operations (${uiState.crudOperations.size})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+                items(uiState.crudOperations, key = { "${it.sourceClass}:${it.operation}" }) { crud ->
+                    val opColor = when (crud.operation) {
+                        "INSERT" -> MaterialTheme.colorScheme.primary
+                        "UPDATE" -> MaterialTheme.colorScheme.tertiary
+                        "DELETE" -> MaterialTheme.colorScheme.error
+                        "GET_TYPE" -> MaterialTheme.colorScheme.secondary
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    color = opColor.copy(alpha = 0.15f),
+                                    shape = MaterialTheme.shapes.small
+                                ) {
+                                    Text(
+                                        text = crud.operation,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = opColor
+                                    )
+                                }
+                                Text(
+                                    text = crud.sourceClass.removePrefix("L").removeSuffix(";")
+                                        .substringAfterLast('/'),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            if (crud.contentValuesKeys.isNotEmpty()) {
+                                Text(
+                                    text = "ContentValues: ${crud.contentValuesKeys.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            if (crud.mimeTypes.isNotEmpty()) {
+                                Text(
+                                    text = "MIME: ${crud.mimeTypes.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Provider details (permissions, path permissions)
             val exportedProviders = uiState.providers.filter { it.isExported }
             if (exportedProviders.isNotEmpty()) {

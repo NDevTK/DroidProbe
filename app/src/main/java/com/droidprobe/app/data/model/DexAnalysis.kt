@@ -33,6 +33,8 @@ data class DexAnalysis(
     val rawContentUriStrings: List<String>,
     val deepLinkUriStrings: List<String> = emptyList(),
     val contentProviderCalls: List<ContentProviderCallInfo> = emptyList(),
+    val crudOperations: List<CrudOperationInfo> = emptyList(),
+    val orderedBroadcasts: List<OrderedBroadcastInfo> = emptyList(),
     val allUrlStrings: List<String> = emptyList(),
     val sensitiveStrings: List<SensitiveString> = emptyList(),
     val apiEndpoints: List<ApiEndpoint> = emptyList(),

@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <permission
+        android:name="com.droidprobe.testapp.permission.ADMIN"
+        android:protectionLevel="signature" />
+    <permission
+        android:name="com.droidprobe.testapp.permission.READ_ARTICLES"
+        android:protectionLevel="dangerous" />
+    <permission
+        android:name="com.droidprobe.testapp.permission.WRITE_ARTICLES"
+        android:protectionLevel="dangerous" />
+
     <application
         android:allowBackup="false"
         android:label="DroidProbe TestApp"
@@ -131,6 +141,31 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".activities.PermissionProtectedActivity"
+            android:exported="true"
+            android:permission="com.droidprobe.testapp.permission.ADMIN">
+            <intent-filter>
+                <action android:name="com.droidprobe.testapp.action.PROTECTED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activities.MimeTypeActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:mimeType="application/pdf" />
+            </intent-filter>
+        </activity>
+
         <!-- === Activity Alias === -->
 
         <activity-alias
@@ -197,6 +232,13 @@
             android:name=".providers.UriBuilderProvider"
             android:authorities="com.droidprobe.testapp.builder"
             android:exported="true" />
+
+        <provider
+            android:name=".providers.CrudProvider"
+            android:authorities="com.droidprobe.testapp.crud"
+            android:exported="true"
+            android:readPermission="com.droidprobe.testapp.permission.READ_ARTICLES"
+            android:writePermission="com.droidprobe.testapp.permission.WRITE_ARTICLES" />
 
         <!-- === FileProvider === -->
 

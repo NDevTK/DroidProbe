@@ -19,7 +19,7 @@ fun PermissionBadge(
 ) {
     val (text, color) = when {
         !isExported -> "Not Exported" to SecureBadge
-        permission != null -> "Protected" to ProtectedBadge
+        permission != null -> permission.substringAfterLast('.') to ProtectedBadge
         else -> "Exported" to ExportedBadge
     }
 

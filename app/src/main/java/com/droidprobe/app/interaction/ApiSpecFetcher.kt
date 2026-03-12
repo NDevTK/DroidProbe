@@ -490,7 +490,8 @@ class ApiSpecFetcher {
                 parameters = params,
                 parameterOrder = params.filter { it.value.location == "path" }.keys.toList(),
                 scopes = emptyList(),
-                source = "dex"
+                source = "dex",
+                hasBody = ep.hasBody
             )
         }
 

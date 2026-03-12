@@ -64,6 +64,7 @@ class DexDiagnosticTest {
                 provider("ParamProvider", "$pkg.params", true),
                 provider("StaticUriProvider", "$pkg.static", true),
                 provider("UriBuilderProvider", "$pkg.builder", true),
+                provider("CrudProvider", "$pkg.crud", true),
                 ProviderComponent("androidx.core.content.FileProvider", "$pkg.fileprovider", false, null, null, null, true, emptyList())
             ),
             customPermissions = emptyList()
@@ -125,6 +126,24 @@ class DexDiagnosticTest {
         sb.appendLine("\n=== DISCOVERED CATEGORIES (${analysis.discoveredCategories.size}) ===")
         for (c in analysis.discoveredCategories) sb.appendLine("  $c")
 
+        sb.appendLine("\n=== CRUD OPERATIONS (${analysis.crudOperations.size}) ===")
+        for (op in analysis.crudOperations) {
+            sb.appendLine("  [${op.operation}] keys=${op.contentValuesKeys} mimeTypes=${op.mimeTypes}")
+            sb.appendLine("    src=${op.sourceClass} method=${op.sourceMethod}")
+        }
+
+        sb.appendLine("\n=== ORDERED BROADCASTS (${analysis.orderedBroadcasts.size}) ===")
+        for (ob in analysis.orderedBroadcasts) {
+            sb.appendLine("  code=${ob.setsResultCode} data=${ob.setsResultData} extras=${ob.setsResultExtras} abort=${ob.abortsbroadcast}")
+            sb.appendLine("    extrasKeys=${ob.resultExtrasKeys} src=${ob.sourceClass}")
+        }
+
+        sb.appendLine("\n=== SECURITY WARNINGS (${analysis.securityWarnings.size}) ===")
+        for (w in analysis.securityWarnings) {
+            sb.appendLine("  [${w.severity}] ${w.title}: ${w.description}")
+            sb.appendLine("    component=${w.componentName}")
+        }
+
         File("build/analysis-dump.txt").writeText(sb.toString())
         assert(true) // Always pass, just dump data
     }
@@ -148,7 +167,9 @@ class DexDiagnosticTest {
             "ApiKeyClient" to "fetchWithApiKey",
             "FakeSecrets" to "<clinit>",
             "PrefixValueActivity" to "onCreate",
-            "StringSwitchActivity" to "onCreate"
+            "StringSwitchActivity" to "onCreate",
+            "OrderedReceiver" to "onReceive",
+            "CrudProvider" to "getType"
         )
 
         for (dexName in dexFile.dexEntryNames) {

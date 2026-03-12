@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.droidprobe.app.data.model.ExportedComponent
 import com.droidprobe.app.data.model.IntentInfo
+import com.droidprobe.app.data.model.OrderedBroadcastInfo
 import com.droidprobe.app.data.repository.AnalysisRepository
 import com.droidprobe.app.interaction.IntentLauncher
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,7 +28,8 @@ data class LaunchableTarget(
     val discoveredExtras: List<IntentInfo>,
     val discoveredDataUris: List<String> = emptyList(),
     val discoveredMimeTypes: Map<String, String> = emptyMap(), // uri -> mimeType from setDataAndType
-    val discoveredCategories: List<String> = emptyList() // categories found in bytecode beyond manifest
+    val discoveredCategories: List<String> = emptyList(), // categories found in bytecode beyond manifest
+    val orderedBroadcastInfo: OrderedBroadcastInfo? = null // ordered broadcast result info for receivers
 )
 
 data class ExtraEntry(
@@ -35,7 +37,8 @@ data class ExtraEntry(
     val value: String = "",
     val type: String = "String",
     val suggestedValues: List<String> = emptyList(),
-    val associatedAction: String? = null
+    val associatedAction: String? = null,
+    val defaultValue: String? = null
 )
 
 data class QueryParamEntry(
@@ -130,6 +133,7 @@ class IntentBuilderViewModel(
                 val dexCategories = dex?.discoveredCategories ?: emptySet()
 
                 val extrasByComponent = discoveredExtras.groupBy { it.associatedComponent }
+                val orderedBroadcasts = dex?.orderedBroadcasts ?: emptyList()
 
                 val targets = mutableListOf<LaunchableTarget>()
 
@@ -260,6 +264,12 @@ class IntentBuilderViewModel(
                         val manifestCatSet = allCategories.toSet()
                         val extraCategories = dexCategories.filter { it !in manifestCatSet }
 
+                        // Look up ordered broadcast info for receivers
+                        val broadcastInfo = if (type == "Receiver") {
+                            val compSmali = "L${comp.name.replace('.', '/')};"
+                            orderedBroadcasts.find { it.sourceClass == compSmali }
+                        } else null
+
                         targets.add(
                             LaunchableTarget(
                                 component = comp,
@@ -270,7 +280,8 @@ class IntentBuilderViewModel(
                                 discoveredExtras = compExtras,
                                 discoveredDataUris = compDataUris,
                                 discoveredMimeTypes = compMimeTypes,
-                                discoveredCategories = extraCategories
+                                discoveredCategories = extraCategories,
+                                orderedBroadcastInfo = broadcastInfo
                             )
                         )
                     }
@@ -292,7 +303,8 @@ class IntentBuilderViewModel(
                 value = "",
                 type = info.extraType ?: "String",
                 suggestedValues = info.possibleValues,
-                associatedAction = info.associatedAction
+                associatedAction = info.associatedAction,
+                defaultValue = info.defaultValue
             )
         }
         _uiState.update {

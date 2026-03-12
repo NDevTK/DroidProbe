@@ -551,6 +551,20 @@ private fun MethodRow(
             Spacer(modifier = Modifier.width(4.dp))
         }
         HttpMethodBadge(method.httpMethod)
+        if (method.hasBody) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = "BODY",
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
+        }
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = method.path,

@@ -339,6 +339,11 @@ private fun TargetCard(
             if (target.discoveredDataUris.isNotEmpty()) {
                 summaryParts.add("${target.discoveredDataUris.size} data URIs")
             }
+            // Show defaults count
+            val defaultCount = target.discoveredExtras.count { it.defaultValue != null }
+            if (defaultCount > 0) {
+                summaryParts.add("$defaultCount defaults")
+            }
             if (summaryParts.isNotEmpty()) {
                 Text(
                     text = summaryParts.joinToString(" + "),
@@ -346,6 +351,38 @@ private fun TargetCard(
                     color = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.padding(top = 2.dp)
                 )
+            }
+
+            // Ordered broadcast info for receivers
+            target.orderedBroadcastInfo?.let { obInfo ->
+                Row(
+                    modifier = Modifier.padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            text = "ORDERED",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    val infoParts = mutableListOf<String>()
+                    if (obInfo.setsResultCode) infoParts.add("resultCode")
+                    if (obInfo.setsResultData) infoParts.add("resultData")
+                    if (obInfo.resultExtrasKeys.isNotEmpty()) {
+                        infoParts.add("extras: ${obInfo.resultExtrasKeys.joinToString(", ")}")
+                    }
+                    if (obInfo.abortsbroadcast) infoParts.add("aborts")
+                    Text(
+                        text = infoParts.joinToString(" | "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // Action buttons
@@ -529,13 +566,29 @@ private fun TargetCard(
 
                         extras.forEachIndexed { index, entry ->
                             Column {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
                                     Text(
                                         text = entry.key,
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.weight(1f)
                                     )
+                                    if (entry.defaultValue != null) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Text(
+                                                text = "default: ${entry.defaultValue}",
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.tertiary
+                                            )
+                                        }
+                                    }
                                     if (entry.associatedAction != null) {
                                         Surface(
                                             color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
@@ -560,7 +613,8 @@ private fun TargetCard(
                                         "Int", "Long", "Short", "Byte" -> KeyboardType.Number
                                         "Float", "Double" -> KeyboardType.Decimal
                                         else -> KeyboardType.Text
-                                    }
+                                    },
+                                    placeholder = entry.defaultValue?.let { "default: $it" }
                                 )
                             }
                         }
